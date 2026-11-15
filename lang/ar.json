@@ -269,5 +269,21 @@
   "ViGEmBus: admin prompt declined or cancelled": "ViGEmBus: تم رفض طلب المسؤول أو إلغاؤه",
   "Connecting…": "جارٍ الاتصال…",
   "ON": "تشغيل",
-  "OFF": "إيقاف"
+  "OFF": "إيقاف",
+  "Update": "تحديث",
+  "Check for updates on start": "التحقق من التحديثات عند البدء",
+  "Check now": "تحقق الآن",
+  "Checking…": "جارٍ التحقق…",
+  "padmimic is up to date": "padmimic محدّث",
+  "padmimic {} is available (you have {}).": "يتوفر padmimic {} (لديك {}).",
+  "padmimic restarts after the update.": "سيُعاد تشغيل padmimic بعد التحديث.",
+  "Release notes": "ملاحظات الإصدار",
+  "Later": "لاحقًا",
+  "Update now": "حدّث الآن",
+  "Downloading the update…": "جارٍ تنزيل التحديث…",
+  "Update check failed – check the internet connection": "فشل التحقق من التحديثات – تحقق من اتصال الإنترنت",
+  "Update check: unexpected answer from GitHub": "التحقق من التحديثات: رد غير متوقع من GitHub",
+  "Update: wrong checksum – nothing was changed": "التحديث: المجموع الاختباري خاطئ – لم يتغير شيء",
+  "Update: download failed – check the internet connection": "التحديث: فشل التنزيل – تحقق من اتصال الإنترنت",
+  "Open source under the GNU GPL v3.": "مفتوح المصدر بموجب GNU GPL v3."
 }

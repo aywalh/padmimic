@@ -269,5 +269,21 @@
   "ViGEmBus: admin prompt declined or cancelled": "ViGEmBus: yêu cầu admin bị từ chối hoặc hủy",
   "Connecting…": "Đang kết nối…",
   "ON": "BẬT",
-  "OFF": "TẮT"
+  "OFF": "TẮT",
+  "Update": "Cập nhật",
+  "Check for updates on start": "Kiểm tra cập nhật khi khởi động",
+  "Check now": "Kiểm tra ngay",
+  "Checking…": "Đang kiểm tra…",
+  "padmimic is up to date": "padmimic đã là bản mới nhất",
+  "padmimic {} is available (you have {}).": "Đã có padmimic {} (bạn đang dùng {}).",
+  "padmimic restarts after the update.": "padmimic sẽ khởi động lại sau khi cập nhật.",
+  "Release notes": "Ghi chú phát hành",
+  "Later": "Để sau",
+  "Update now": "Cập nhật ngay",
+  "Downloading the update…": "Đang tải bản cập nhật…",
+  "Update check failed – check the internet connection": "Kiểm tra cập nhật thất bại – hãy kiểm tra kết nối Internet",
+  "Update check: unexpected answer from GitHub": "Kiểm tra cập nhật: GitHub trả về kết quả không mong đợi",
+  "Update: wrong checksum – nothing was changed": "Cập nhật: sai mã kiểm tra – không có gì thay đổi",
+  "Update: download failed – check the internet connection": "Cập nhật: tải xuống thất bại – hãy kiểm tra kết nối Internet",
+  "Open source under the GNU GPL v3.": "Mã nguồn mở theo GNU GPL v3."
 }

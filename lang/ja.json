@@ -269,5 +269,21 @@
   "ViGEmBus: admin prompt declined or cancelled": "ViGEmBus: 管理者確認が拒否またはキャンセルされました",
   "Connecting…": "接続中…",
   "ON": "ON",
-  "OFF": "OFF"
+  "OFF": "OFF",
+  "Update": "アップデート",
+  "Check for updates on start": "起動時にアップデートを確認",
+  "Check now": "今すぐ確認",
+  "Checking…": "確認中…",
+  "padmimic is up to date": "padmimic は最新です",
+  "padmimic {} is available (you have {}).": "padmimic {} が利用可能です（現在 {}）。",
+  "padmimic restarts after the update.": "アップデート後に padmimic は再起動します。",
+  "Release notes": "リリースノート",
+  "Later": "後で",
+  "Update now": "今すぐアップデート",
+  "Downloading the update…": "アップデートをダウンロード中…",
+  "Update check failed – check the internet connection": "アップデートの確認に失敗しました – インターネット接続を確認してください",
+  "Update check: unexpected answer from GitHub": "アップデート確認：GitHub から予期しない応答",
+  "Update: wrong checksum – nothing was changed": "アップデート：チェックサムが不正 – 変更はありません",
+  "Update: download failed – check the internet connection": "アップデート：ダウンロードに失敗しました – インターネット接続を確認してください",
+  "Open source under the GNU GPL v3.": "GNU GPL v3 のオープンソース。"
 }

@@ -3,6 +3,7 @@
 
 use crate::engine::{self, Event, Shared, eval_stick, pad_down};
 use crate::i18n::{self, tr, trf};
+use crate::update::{self, State as Upd};
 use crate::model::*;
 use crate::winio;
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Theme, Vec2, vec2};
@@ -766,6 +767,7 @@ enum Dlg {
     Reset,
     About,
     Latency,
+    Update,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -797,6 +799,7 @@ pub struct App {
     show_live: bool,
     trail: Trail,
     lang_prompt: Option<usize>, // first start: language to offer
+    upd: Arc<std::sync::Mutex<Upd>>,
     lang_more: bool,
     vigem_msg: Arc<std::sync::Mutex<Option<String>>>, // Some while installing, then the result
 }
@@ -824,10 +827,12 @@ impl App {
         let mut app = App {
             p_sent, st_sent, saved: p.clone(), p, s, st, path,
             profiles: vec![], tab: Tab::Controller, dlgs: vec![], cap: None, pick_tab: 0, adv_page: 0, adv_sel: 0, set_page: 0,
-            epp_prev, auto_t: Instant::now(), auto_last: String::new(), toast: None, show_live: true, trail: Default::default(), lang_prompt, lang_more: false,
+            epp_prev, auto_t: Instant::now(), auto_last: String::new(), toast: None, show_live: true, trail: Default::default(), lang_prompt, lang_more: false, upd: Arc::default(),
             vigem_msg: Arc::default(),
         };
         app.scan_profiles();
+        update::cleanup();
+        if app.st.check_updates { app.check_updates() }
         // dev hook for screenshots: PADMIMIC_SHOW=settings,languages,mouse,stick,latency,lang opens those at start
         for d in std::env::var("PADMIMIC_SHOW").unwrap_or_default().split(',') {
             match d {
@@ -854,6 +859,27 @@ impl App {
         }
         v.sort();
         self.profiles = v;
+    }
+
+    fn check_updates(&self) {
+        let u = self.upd.clone();
+        *u.lock().unwrap() = Upd::Checking;
+        std::thread::spawn(move || {
+            let r = match update::check() {
+                Ok(Some(r)) => Upd::Available(r),
+                Ok(None) => Upd::Latest,
+                Err(e) => Upd::Failed(e),
+            };
+            *u.lock().unwrap() = r;
+        });
+    }
+
+    fn install_update(&self, r: update::Release) {
+        let u = self.upd.clone();
+        *u.lock().unwrap() = Upd::Installing;
+        std::thread::spawn(move || {
+            *u.lock().unwrap() = match update::install(&r) { Ok(()) => Upd::Restarting, Err(e) => Upd::Failed(e) };
+        });
     }
 
     fn open(&mut self, d: Dlg) {
@@ -972,6 +998,12 @@ impl App {
                 if win_btn(ui, WinBtn::Min) { ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)) }
                 ui.add_space(10.0);
                 if switch(ui, on) { self.s.on.store(!on, Relaxed) }
+                let avail = match &*self.upd.lock().unwrap() { Upd::Available(r) => Some(r.version.clone()), _ => None };
+                if let Some(v) = avail {
+                    let c = pal(ui.visuals().dark_mode);
+                    let b = egui::Button::new(RichText::new(format!("⬆ {} v{v}", tr("Update"))).font(mono(12.5)).color(Color32::BLACK)).fill(c.amber);
+                    if ui.add(b).clicked() { self.open(Dlg::Update) }
+                }
             });
         });
     }
@@ -1248,6 +1280,7 @@ impl App {
                 Dlg::Reset => (tr("Reset").into(), 360.0),
                 Dlg::About => (tr("About padmimic").into(), 360.0),
                 Dlg::Latency => (tr("Latency meter").into(), 560.0),
+                Dlg::Update => (tr("Update").into(), 380.0),
             };
             let mut done = false;
             egui::Window::new(title)
@@ -1275,6 +1308,7 @@ impl App {
                         Dlg::Reset => self.dlg_reset(ui),
                         Dlg::About => self.dlg_about(ui),
                         Dlg::Latency => true, // own window, see latency_window
+                        Dlg::Update => self.dlg_update(ui),
                     });
                 });
             if !open || done { close.push(d.clone()) }
@@ -1753,6 +1787,7 @@ impl App {
         let toggle_cap = self.capturing(Cap::Toggle);
         let mut cap_toggle = false;
         let mut pick_lang = None;
+        let mut check_now = false;
         let st = &mut self.st;
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
@@ -1774,6 +1809,18 @@ impl App {
                         ui.label(tr("On/off hotkey:"));
                         let l = if toggle_cap { tr("Press…").to_string() } else { match st.toggle { Input::Key(k) => winio::key_name(k), Input::Pad(o) => format!("🎮 {}", o.label()) } };
                         cap_toggle = ui.button(l).clicked();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut st.check_updates, tr("Check for updates on start"));
+                        check_now = ui.button(tr("Check now")).clicked();
+                        let status = match &*self.upd.lock().unwrap() {
+                            Upd::Checking => tr("Checking…").to_string(),
+                            Upd::Latest => tr("padmimic is up to date").to_string(),
+                            Upd::Available(r) => format!("⬆ v{}", r.version),
+                            Upd::Failed(e) => tr(e).to_string(),
+                            _ => String::new(),
+                        };
+                        ui.weak(status);
                     });
                     card(ui, tr("Key repeat"), |ui| {
                         ui.checkbox(&mut st.key_repeat, tr("Active"));
@@ -1828,6 +1875,7 @@ impl App {
         self.set_page = page;
         if cap_toggle { self.cap = Some((Cap::Toggle, false)) }
         if let Some(l) = pick_lang { self.set_lang(ui.ctx(), l) }
+        if check_now { self.check_updates() }
         let mut done = false;
         ui.separator();
         ui.horizontal(|ui| {
@@ -1875,6 +1923,29 @@ impl App {
         }
     }
 
+    fn dlg_update(&mut self, ui: &mut egui::Ui) -> bool {
+        let state = self.upd.lock().unwrap().clone();
+        let mut done = false;
+        match state {
+            Upd::Available(r) => {
+                ui.label(trf("padmimic {} is available (you have {}).", &[&r.version, &env!("CARGO_PKG_VERSION")]));
+                ui.weak(tr("padmimic restarts after the update."));
+                if !r.page.is_empty() { ui.hyperlink_to(tr("Release notes"), &r.page); }
+                ui.horizontal(|ui| {
+                    if ui.button(tr("Later")).clicked() { done = true }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let b = egui::Button::new(RichText::new(tr("Update now")).color(Color32::BLACK)).fill(accent(ui.visuals().dark_mode)).min_size(vec2(110.0, 28.0));
+                        if ui.add(b).clicked() { self.install_update(r.clone()) }
+                    });
+                });
+            }
+            Upd::Installing => { ui.horizontal(|ui| { ui.spinner(); ui.label(tr("Downloading the update…")); }); }
+            Upd::Failed(e) => { ui.label(tr(&e)); done = Self::ok_row(ui) }
+            _ => done = true,
+        }
+        done
+    }
+
     fn dlg_save_as(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
         let Some(Dlg::SaveAs(name)) = self.dlgs.get_mut(idx) else { return true };
         ui.horizontal(|ui| { ui.label(tr("Name:")); ui.text_edit_singleline(name); });
@@ -1902,6 +1973,8 @@ impl App {
         ui.label(RichText::new(format!("padmimic {}", env!("CARGO_PKG_VERSION"))).strong());
         ui.label(tr("Controller, keyboard & mouse → keyboard, mouse and a virtual Xbox 360 controller."));
         ui.weak(tr("Mapping logic (slots, turbo, sets, zones, curves) modelled on AntiMicroX."));
+        ui.weak(tr("Open source under the GNU GPL v3."));
+        ui.hyperlink_to(format!("github.com/{}", update::REPO), format!("https://github.com/{}", update::REPO));
         Self::ok_row(ui)
     }
 
@@ -2067,6 +2140,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.dialogs(&ctx);
         self.lang_prompt(&ctx);
+        if matches!(*self.upd.lock().unwrap(), Upd::Restarting) { ctx.send_viewport_cmd(egui::ViewportCommand::Close) }
         self.sync();
     }
 

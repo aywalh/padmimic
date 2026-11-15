@@ -2,6 +2,9 @@
 name = "padmimic"
 version = "0.1.0"
 edition = "2024"
+description = "Controller remapper for Windows: real gamepad to keyboard, mouse and a virtual Xbox 360 controller"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/aywalh/padmimic"
 
 [dependencies]
 eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts"] }

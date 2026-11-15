@@ -3,6 +3,7 @@ mod engine;
 mod i18n;
 mod model;
 mod ui;
+mod update;
 mod winio;
 
 use engine::{Live, Shared};

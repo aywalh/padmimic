@@ -392,6 +392,7 @@ pub struct Settings {
     pub toggle: Input,
     /// UI language code ("en", "de", …); empty = not chosen yet, ask on start.
     pub lang: String,
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -403,6 +404,7 @@ impl Default for Settings {
             smoothing: false, history: 10, weight: 0.2, mouse_refresh: 1, auto_profile: false, auto_profiles: vec![],
             toggle: Input::Key(0x77),
             lang: String::new(),
+            check_updates: true,
         }
     }
 }

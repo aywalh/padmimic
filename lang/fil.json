@@ -269,5 +269,21 @@
   "ViGEmBus: admin prompt declined or cancelled": "ViGEmBus: tinanggihan o kinansela ang admin prompt",
   "Connecting…": "Kumokonekta…",
   "ON": "ON",
-  "OFF": "OFF"
+  "OFF": "OFF",
+  "Update": "Update",
+  "Check for updates on start": "Mag-check ng update sa pagbukas",
+  "Check now": "I-check ngayon",
+  "Checking…": "Tinitingnan…",
+  "padmimic is up to date": "Pinakabago na ang padmimic",
+  "padmimic {} is available (you have {}).": "May padmimic {} na (ang gamit mo ay {}).",
+  "padmimic restarts after the update.": "Magre-restart ang padmimic pagkatapos ng update.",
+  "Release notes": "Release notes",
+  "Later": "Mamaya",
+  "Update now": "I-update ngayon",
+  "Downloading the update…": "Dina-download ang update…",
+  "Update check failed – check the internet connection": "Nabigo ang pag-check ng update – tingnan ang internet connection",
+  "Update check: unexpected answer from GitHub": "Pag-check ng update: hindi inaasahang sagot mula sa GitHub",
+  "Update: wrong checksum – nothing was changed": "Update: mali ang checksum – walang binago",
+  "Update: download failed – check the internet connection": "Update: nabigo ang download – tingnan ang internet connection",
+  "Open source under the GNU GPL v3.": "Open source sa ilalim ng GNU GPL v3."
 }
