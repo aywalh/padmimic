@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 mod engine;
+mod i18n;
 mod model;
 mod ui;
 mod winio;
@@ -18,7 +19,7 @@ fn main() -> eframe::Result {
         profile: Mutex::default(),
         settings: Mutex::new(Arc::new(st.clone())),
         on: AtomicBool::new(false),
-        live: Mutex::new(Live { status: "Verbinde…".into(), ..Default::default() }),
+        live: Mutex::new(Live { status: "Connecting…".into(), ..Default::default() }),
         set_cmd: Mutex::default(),
         events: Mutex::default(),
     });

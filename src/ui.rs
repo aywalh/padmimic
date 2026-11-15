@@ -1,7 +1,8 @@
 //! AntiMicroX layout (profile bar, element grid, sets 1-8, Quick Set / Names / Pref / Reset, edit dialogs),
-//! drawn Apple-style.
+//! retro-modern look. Every text is English and goes through `tr` (see i18n.rs).
 
 use crate::engine::{self, Event, Shared, eval_stick, pad_down};
+use crate::i18n::{self, tr, trf};
 use crate::model::*;
 use crate::winio;
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Theme, Vec2, vec2};
@@ -34,17 +35,34 @@ fn mono(s: f32) -> FontId {
     FontId::monospace(s)
 }
 
-pub fn style(ctx: &egui::Context) {
+/// Windows fonts: Segoe UI / Cascadia Mono for Latin, then fallbacks for Japanese, Chinese, Korean
+/// and Arabic. The current language's CJK font goes first, because the same Han character is drawn
+/// differently in Japanese and Chinese.
+pub fn set_fonts(ctx: &egui::Context) {
+    use egui::FontFamily::{Monospace, Proportional};
     let mut fonts = egui::FontDefinitions::default();
-    for (name, file, fam) in [("ui", "segoeui.ttf", egui::FontFamily::Proportional), ("mono", "CascadiaMono.ttf", egui::FontFamily::Monospace), ("mono2", "consola.ttf", egui::FontFamily::Monospace)] {
-        if let Ok(data) = std::fs::read(format!(r"C:\Windows\Fonts\{file}")) {
-            fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(data)));
-            let list = fonts.families.get_mut(&fam).unwrap();
-            let at = if name == "mono2" { 1.min(list.len()) } else { 0 };
-            list.insert(at, name.into());
-        }
+    let mut load = |name: &str, file: &str| {
+        let ok = std::fs::read(format!(r"C:\Windows\Fonts\{file}")).map(|d| fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(d)))).is_ok();
+        ok.then(|| name.to_string())
+    };
+    // Segoe UI Variable has no Arabic glyphs, so Arabic words always become shaping runs of their own
+    // (needed for right-to-left order, see i18n::rtl); plain Segoe UI only if it is missing
+    let ui_font = load("ui", "SegUIVar.ttf").or_else(|| load("ui", "segoeui.ttf"));
+    let mono = [load("mono", "CascadiaMono.ttf"), load("mono2", "consola.ttf")];
+    let (ja, zh, ko) = (load("ja", "YuGothM.ttc"), load("zh", "msyh.ttc"), load("ko", "malgun.ttf"));
+    let ar = load("ar", "arial.ttf");
+    let cjk = match i18n::cur() { 2 => [ja, zh, ko], 4 => [ko, ja, zh], _ => [zh, ja, ko] };
+    let fallbacks: Vec<String> = cjk.into_iter().chain([ar]).flatten().collect();
+    for (fam, first) in [(Proportional, vec![ui_font]), (Monospace, mono.to_vec())] {
+        let list = fonts.families.get_mut(&fam).unwrap();
+        for (i, f) in first.into_iter().flatten().enumerate() { list.insert(i, f) }
+        list.extend(fallbacks.iter().cloned());
     }
     ctx.set_fonts(fonts);
+}
+
+pub fn style(ctx: &egui::Context) {
+    set_fonts(ctx);
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = vec2(8.0, 7.0);
         s.spacing.button_padding = vec2(10.0, 5.0);
@@ -129,7 +147,7 @@ fn switch(ui: &mut egui::Ui, on: bool) -> bool {
     let lc = if on { c.acc } else { c.weak.gamma_multiply(0.5) };
     if on { glow_circle(p, led, 4.0, c.acc.gamma_multiply(t)) }
     p.circle_filled(led, 4.0, lc);
-    p.text(Pos2::new(rect.left() + 28.0, rect.center().y), Align2::LEFT_CENTER, if on { "AKTIV" } else { "AUS" }, mono(12.5), if on { c.acc } else { c.weak });
+    p.text(Pos2::new(rect.left() + 28.0, rect.center().y), Align2::LEFT_CENTER, tr(if on { "ON" } else { "OFF" }), mono(12.5), if on { c.acc } else { c.weak });
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
@@ -193,6 +211,32 @@ fn window_edges(ctx: &egui::Context) {
         ctx.set_cursor_icon(cur);
         if ctx.input(|i| i.pointer.primary_pressed()) { ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(d)) }
     }
+}
+
+/// Language tiles: own name big, English name small under it. Returns the clicked language.
+fn lang_grid(ui: &mut egui::Ui, current: usize, skip: &[usize]) -> Option<usize> {
+    let c = pal(ui.visuals().dark_mode);
+    let ids: Vec<usize> = (0..i18n::LANGS.len()).filter(|i| !skip.contains(i)).collect();
+    let cols = if ui.available_width() > 420.0 { 3 } else { 2 };
+    let w = (ui.available_width() - (cols - 1) as f32 * 8.0) / cols as f32;
+    let mut hit = None;
+    egui::Grid::new(("langs", skip.len())).spacing([8.0, 8.0]).show(ui, |ui| {
+        for (n, &i) in ids.iter().enumerate() {
+            let (rect, resp) = ui.allocate_exact_size(vec2(w, 46.0), Sense::click());
+            let on = i == current;
+            let hot = resp.hovered();
+            let p = ui.painter();
+            if on { glow(p, rect, 4.0, c.acc) }
+            p.rect_filled(rect, 4.0, if on { c.acc.gamma_multiply(0.2) } else if hot { c.hover } else { c.idle });
+            p.rect_stroke(rect, 4.0, Stroke::new(1.0, if on || hot { c.acc } else { c.line }), StrokeKind::Inside);
+            p.text(rect.center() - vec2(0.0, 7.0), Align2::CENTER_CENTER, i18n::native(i), FontId::proportional(15.0), if on { c.acc } else { c.text });
+            let english = ["English", "German", "Japanese", "Chinese (Simplified)", "Korean", "Vietnamese", "Filipino", "Arabic"][i];
+            p.text(rect.center() + vec2(0.0, 11.0), Align2::CENTER_CENTER, english, mono(10.0), c.weak);
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { hit = Some(i) }
+            if n % cols == cols - 1 { ui.end_row() }
+        }
+    });
+    hit
 }
 
 /// A grid cell like AntiMicro's button widgets: caption + current assignment, lit while pressed.
@@ -299,7 +343,7 @@ impl<'a> Regler<'a> {
         }
         p.text(rect.left_center() + vec2(9.0, 0.0), Align2::LEFT_CENTER, self.text, FontId::proportional(13.0), dim(c.text));
         p.text(rect.right_center() - vec2(9.0, 0.0), Align2::RIGHT_CENTER, format!("{}{}", fmt(val), self.suffix), mono(12.5), dim(if hot { c.acc } else { c.text }));
-        resp.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text("Ziehen = einstellen (Shift = fein) · Klick = Zahl eintippen")
+        resp.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text(tr("Drag = adjust (Shift = fine) · Click = type a number"))
     }
 }
 
@@ -308,9 +352,9 @@ impl<'a> Regler<'a> {
 pub fn act_text(a: Act) -> String {
     match a {
         Act::Key(vk) => winio::key_name(vk),
-        Act::Mouse(b) => ["", "Maus L", "Maus R", "Maus M", "Maus 4", "Maus 5"][b.min(5) as usize].into(),
-        Act::Wheel(w) => ["Rad ↑", "Rad ↓", "Rad ←", "Rad →"][w.min(3) as usize].into(),
-        Act::Move(d) => ["", "Maus ↑", "Maus ↓", "Maus ←", "Maus →"][d.min(4) as usize].into(),
+        Act::Mouse(b) => tr(["", "Mouse L", "Mouse R", "Mouse M", "Mouse 4", "Mouse 5"][b.min(5) as usize]).into(),
+        Act::Wheel(w) => format!("{} {}", tr("Wheel"), ["↑", "↓", "←", "→"][w.min(3) as usize]),
+        Act::Move(d) => format!("{} {}", tr("Mouse"), ["", "↑", "↓", "←", "→"][d.min(4) as usize]),
         Act::Pad(o) => format!("🎮 {}", o.label()),
     }
 }
@@ -322,18 +366,18 @@ fn secs(ms: u32) -> String {
 pub fn slot_text(s: &Slot) -> String {
     match s {
         Slot::Out(a) => act_text(*a),
-        Slot::Pause(ms) => format!("Pause {}", secs(*ms)),
-        Slot::Hold(ms) => format!("Halten {}", secs(*ms)),
-        Slot::Cycle => "Zyklus".into(),
-        Slot::Distance(p) => format!("Distanz {p}%"),
-        Slot::Release(ms) => format!("Loslassen {}", secs(*ms)),
-        Slot::MouseMod(p) => format!("Maus-Mod {p}%"),
-        Slot::PressTime(ms) => format!("Druckzeit {}", secs(*ms)),
-        Slot::Delay(ms) => format!("Verzögerung {}", secs(*ms)),
+        Slot::Pause(ms) => format!("{} {}", tr("Pause"), secs(*ms)),
+        Slot::Hold(ms) => format!("{} {}", tr("Hold"), secs(*ms)),
+        Slot::Cycle => tr("Cycle").into(),
+        Slot::Distance(p) => format!("{} {p}%", tr("Distance")),
+        Slot::Release(ms) => format!("{} {}", tr("Release"), secs(*ms)),
+        Slot::MouseMod(p) => format!("{} {p}%", tr("Mouse mod")),
+        Slot::PressTime(ms) => format!("{} {}", tr("Press time"), secs(*ms)),
+        Slot::Delay(ms) => format!("{} {}", tr("Delay"), secs(*ms)),
         Slot::SetChange(s) => format!("Set {}", s + 1),
-        Slot::Text(t) => format!("Text „{t}“"),
-        Slot::Exec { path, .. } => format!("Start {}", path.rsplit(['\\', '/']).next().unwrap_or("")),
-        Slot::Load(p) => format!("Profil {}", stem(p)),
+        Slot::Text(t) => format!("{} “{t}”", tr("Text")),
+        Slot::Exec { path, .. } => format!("{} {}", tr("Run"), path.rsplit(['\\', '/']).next().unwrap_or("")),
+        Slot::Load(p) => format!("{} {}", tr("Profile"), stem(p)),
     }
 }
 
@@ -352,10 +396,10 @@ fn stem(path: &str) -> String {
     std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-const INSTALLING: &str = "ViGEmBus wird installiert…";
+const INSTALLING: &str = "Installing ViGEmBus…";
 
 const BTN_NAMES: [&str; 11] = ["A", "B", "X", "Y", "LB", "RB", "Back", "Start", "Guide", "L3", "R3"];
-const STICK_NAMES: [&str; 2] = ["Linker Stick", "Rechter Stick"];
+const STICK_NAMES: [&str; 2] = ["Left stick", "Right stick"];
 const TRIG_NAMES: [&str; 2] = ["LT", "RT"];
 
 fn elem_name(p: &Set, e: Elem) -> String {
@@ -366,8 +410,8 @@ fn elem_name(p: &Set, e: Elem) -> String {
     match e {
         Elem::Btn(i) => BTN_NAMES[i as usize].into(),
         Elem::DPad(d) => format!("D-Pad {}", DIRS[d as usize]),
-        Elem::Stick(s, d) => format!("{} {}", STICK_NAMES[s as usize], DIRS[d as usize]),
-        Elem::StickMod(s) => format!("{} Modifier", STICK_NAMES[s as usize]),
+        Elem::Stick(s, d) => format!("{} {}", tr(STICK_NAMES[s as usize]), DIRS[d as usize]),
+        Elem::StickMod(s) => format!("{} {}", tr(STICK_NAMES[s as usize]), tr("Modifier")),
         Elem::Trig(t, pos) => format!("{} {}", TRIG_NAMES[t as usize], if pos { "+" } else { "−" }),
         Elem::Key(i) => p.keys.get(i as usize).map(|k| format!("⌨ {}", winio::key_name(k.vk))).unwrap_or_default(),
     }
@@ -403,11 +447,11 @@ const KB_NUM: [&[(u16, f32)]; 6] = [
 
 fn short_key(vk: u16) -> String {
     match vk {
-        0x20 => "Leer".into(), 0x0D => "Enter".into(), 0x09 => "Tab".into(), 0x14 => "Caps".into(), 0xA0 | 0xA1 => "Shift".into(),
-        0x08 => "←─".into(), 0x2E => "Entf".into(), 0x2D => "Einfg".into(), 0x21 => "PgUp".into(), 0x22 => "PgDn".into(), 0x24 => "Pos1".into(),
-        0x23 => "Ende".into(), 0x13 => "Pause".into(), 0x90 => "Num".into(), 0xA4 => "Alt".into(), 0xA5 => "AltGr".into(), 0x5B => "Win".into(), 0x5D => "Menü".into(),
-        0xA2 | 0xA3 => "Strg".into(), 0x60..=0x69 => format!("{}", vk - 0x60), 0x6A => "*".into(), 0x6B => "+".into(),
-        0x6D => "-".into(), 0x6E => ",".into(), 0x6F => "/".into(), 0x2C => "Druck".into(), 0x91 => "Roll".into(),
+        0x20 => tr("Space").into(), 0x0D => "Enter".into(), 0x09 => "Tab".into(), 0x14 => "Caps".into(), 0xA0 | 0xA1 => "Shift".into(),
+        0x08 => "←─".into(), 0x2E => "Del".into(), 0x2D => "Ins".into(), 0x21 => "PgUp".into(), 0x22 => "PgDn".into(), 0x24 => "Home".into(),
+        0x23 => "End".into(), 0x13 => "Pause".into(), 0x90 => "Num".into(), 0xA4 => "Alt".into(), 0xA5 => "AltGr".into(), 0x5B => "Win".into(), 0x5D => "Menu".into(),
+        0xA2 | 0xA3 => "Ctrl".into(), 0x60..=0x69 => format!("{}", vk - 0x60), 0x6A => "*".into(), 0x6B => "+".into(),
+        0x6D => "-".into(), 0x6E => ",".into(), 0x6F => "/".into(), 0x2C => "Print".into(), 0x91 => "Scroll".into(),
         _ => winio::key_name(vk),
     }
 }
@@ -453,8 +497,8 @@ fn chip(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
 /// Keyboard / mouse / virtual pad output picker.
 fn act_picker(ui: &mut egui::Ui, tab: &mut u8, sel: Option<Act>, numpad: bool) -> Option<Act> {
     ui.horizontal(|ui| {
-        for (i, l) in ["⌨ Tastatur", "🖱 Maus", "🎮 Controller"].into_iter().enumerate() {
-            ui.selectable_value(tab, i as u8, l);
+        for (i, l) in [("⌨", "Keyboard"), ("🖱", "Mouse"), ("🎮", "Controller")].into_iter().enumerate() {
+            ui.selectable_value(tab, i as u8, format!("{} {}", l.0, tr(l.1)));
         }
     });
     let mut hit = None;
@@ -462,9 +506,9 @@ fn act_picker(ui: &mut egui::Ui, tab: &mut u8, sel: Option<Act>, numpad: bool) -
         0 => hit = keyboard(ui, match sel { Some(Act::Key(k)) => Some(k), _ => None }, numpad).map(Act::Key),
         1 => {
             for (label, acts) in [
-                ("Tasten", vec![Act::Mouse(1), Act::Mouse(3), Act::Mouse(2), Act::Mouse(4), Act::Mouse(5)]),
-                ("Rad", vec![Act::Wheel(0), Act::Wheel(1), Act::Wheel(2), Act::Wheel(3)]),
-                ("Bewegung", vec![Act::Move(1), Act::Move(2), Act::Move(3), Act::Move(4)]),
+                (tr("Buttons"), vec![Act::Mouse(1), Act::Mouse(3), Act::Mouse(2), Act::Mouse(4), Act::Mouse(5)]),
+                (tr("Wheel"), vec![Act::Wheel(0), Act::Wheel(1), Act::Wheel(2), Act::Wheel(3)]),
+                (tr("Movement"), vec![Act::Move(1), Act::Move(2), Act::Move(3), Act::Move(4)]),
             ] {
                 ui.horizontal_wrapped(|ui| {
                     ui.add_sized([70.0, 24.0], egui::Label::new(RichText::new(label).weak()));
@@ -663,9 +707,9 @@ fn controller(ui: &mut egui::Ui, g: &XGamepad, out: Option<&XGamepad>, sticks: &
     let line = format!("LS {}   RS {}   LT {:03}  RT {:03}", stick_txt(g.thumb_lx, g.thumb_ly), stick_txt(g.thumb_rx, g.thumb_ry), g.left_trigger, g.right_trigger);
     p.text(Pos2::new(resp.rect.center().x, resp.rect.bottom() - 12.0), Align2::CENTER_CENTER, line, mono(12.0), c.weak);
     if out.is_some() {
-        p.text(o + vec2(w, 2.0), Align2::RIGHT_TOP, "■ virtuell", mono(11.0), c.amber);
+        p.text(o + vec2(w, 2.0), Align2::RIGHT_TOP, format!("■ {}", tr("virtual")), mono(11.0), c.amber);
     }
-    p.text(o + vec2(0.0, 2.0), Align2::LEFT_TOP, "■ echt", mono(11.0), c.acc); // legend in the top corners, clear of the readout
+    p.text(o + vec2(0.0, 2.0), Align2::LEFT_TOP, format!("■ {}", tr("real")), mono(11.0), c.acc); // legend in the top corners, clear of the readout
 }
 
 /// JoyControlStickStatusBox: zones, diagonal sectors and the live position.
@@ -752,11 +796,25 @@ pub struct App {
     toast: Option<(String, Instant)>,
     show_live: bool,
     trail: Trail,
+    lang_prompt: Option<usize>, // first start: language to offer
+    lang_more: bool,
     vigem_msg: Arc<std::sync::Mutex<Option<String>>>, // Some while installing, then the result
 }
 
 impl App {
-    pub fn new(s: Arc<Shared>, st: Settings) -> Self {
+    pub fn new(s: Arc<Shared>, mut st: Settings) -> Self {
+        // language: the saved one, else English and (once) offer the language of where the user is
+        // dev hook for screenshots: PADMIMIC_LANG=ja shows that language without saving it
+        let dev_lang = std::env::var("PADMIMIC_LANG").ok().and_then(|c| i18n::id_of(&c));
+        let lang_prompt = match dev_lang.or(i18n::id_of(&st.lang)) {
+            Some(l) => { i18n::set(l); None }
+            None => {
+                i18n::set(0);
+                let sys = i18n::system().filter(|&l| l != 0);
+                if sys.is_none() { st.lang = "en".into() }
+                sys
+            }
+        };
         let path = if st.auto_load_last && Profile::load(&st.last_profile).is_some() { st.last_profile.clone() } else { String::new() };
         let p = Profile::load(&path).unwrap_or_default();
         *s.profile.lock().unwrap() = Arc::new(p.clone());
@@ -766,10 +824,22 @@ impl App {
         let mut app = App {
             p_sent, st_sent, saved: p.clone(), p, s, st, path,
             profiles: vec![], tab: Tab::Controller, dlgs: vec![], cap: None, pick_tab: 0, adv_page: 0, adv_sel: 0, set_page: 0,
-            epp_prev, auto_t: Instant::now(), auto_last: String::new(), toast: None, show_live: true, trail: Default::default(),
+            epp_prev, auto_t: Instant::now(), auto_last: String::new(), toast: None, show_live: true, trail: Default::default(), lang_prompt, lang_more: false,
             vigem_msg: Arc::default(),
         };
         app.scan_profiles();
+        // dev hook for screenshots: PADMIMIC_SHOW=settings,languages,mouse,stick,latency,lang opens those at start
+        for d in std::env::var("PADMIMIC_SHOW").unwrap_or_default().split(',') {
+            match d {
+                "settings" => app.open(Dlg::Settings),
+                "languages" => { app.set_page = 1; app.open(Dlg::Settings) }
+                "mouse" => app.open(Dlg::Mouse(MouseTarget::DPad)),
+                "latency" => app.open(Dlg::Latency),
+                "stick" => app.open(Dlg::Stick(0)),
+                "lang" => app.lang_prompt = i18n::system().or(Some(1)),
+                _ => {}
+            }
+        }
         app
     }
 
@@ -810,9 +880,9 @@ impl App {
                 self.saved = p;
                 self.path = path.into();
                 self.remember(path);
-                self.toast(format!("Profil „{}“ geladen", stem(path)));
+                self.toast(trf("Profile “{}” loaded", &[&stem(path)]));
             }
-            None => self.toast(format!("Profil {path} konnte nicht geladen werden")),
+            None => self.toast(trf("Profile {} could not be loaded", &[&path])),
         }
     }
 
@@ -830,9 +900,9 @@ impl App {
                 self.remember(&path);
                 self.path = path;
                 self.scan_profiles();
-                self.toast("Gespeichert");
+                self.toast(tr("Saved"));
             }
-            Err(e) => self.toast(format!("Speichern fehlgeschlagen: {e}")),
+            Err(e) => self.toast(trf("Saving failed: {}", &[&e])),
         }
     }
 
@@ -888,12 +958,12 @@ impl App {
             // blinking block cursor after the name, like an old terminal prompt
             let blink = (ui.input(|i| i.time) * 1.6) as i64 % 2 == 0;
             ui.label(RichText::new(format!("PADMIMIC{}", if blink { "█" } else { " " })).font(mono(20.0)).color(c.acc));
-            ui.menu_button("Optionen", |ui| {
-                if ui.button("Einstellungen…").clicked() { self.open(Dlg::Settings); ui.close() }
-                if ui.button("Latenz-Messung…").clicked() { self.open(Dlg::Latency); ui.close() }
+            ui.menu_button(tr("Options"), |ui| {
+                if ui.button(tr("Settings…")).clicked() { self.open(Dlg::Settings); ui.close() }
+                if ui.button(tr("Latency meter…")).clicked() { self.open(Dlg::Latency); ui.close() }
             });
-            ui.menu_button("Hilfe", |ui| {
-                if ui.button("Über padmimic").clicked() { self.open(Dlg::About); ui.close() }
+            ui.menu_button(tr("Help"), |ui| {
+                if ui.button(tr("About padmimic")).clicked() { self.open(Dlg::About); ui.close() }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let ctx = ui.ctx().clone();
@@ -909,10 +979,10 @@ impl App {
     fn profile_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let dirty = self.p != self.saved;
-            let name = if self.path.is_empty() { "<Neu>".to_string() } else { stem(&self.path) };
+            let name = if self.path.is_empty() { format!("<{}>", tr("New")) } else { stem(&self.path) };
             let mut pick: Option<String> = None;
             egui::ComboBox::from_id_salt("profile").width(170.0).selected_text(format!("{name}{}", if dirty { " •" } else { "" })).show_ui(ui, |ui| {
-                if ui.selectable_label(self.path.is_empty(), "<Neu>").clicked() { pick = Some(String::new()) }
+                if ui.selectable_label(self.path.is_empty(), format!("<{}>", tr("New"))).clicked() { pick = Some(String::new()) }
                 for p in &self.profiles {
                     if ui.selectable_label(*p == self.path, stem(p)).clicked() { pick = Some(p.clone()) }
                 }
@@ -922,15 +992,15 @@ impl App {
                 Some(p) => self.load(&p),
                 None => {}
             }
-            if ui.button("Laden").on_hover_text("Profil erneut von der Festplatte laden").clicked() && !self.path.is_empty() {
+            if ui.button(tr("Load")).on_hover_text(tr("Load the profile from disk again")).clicked() && !self.path.is_empty() {
                 let p = self.path.clone();
                 self.load(&p);
             }
-            if ui.button("Speichern").clicked() {
+            if ui.button(tr("Save")).clicked() {
                 if self.path.is_empty() { self.open(Dlg::SaveAs(String::new())) } else { let p = self.path.clone(); self.save_to(p) }
             }
-            if ui.button("Speichern unter").clicked() { self.open(Dlg::SaveAs(stem(&self.path))) }
-            if ui.button("Entfernen").on_hover_text("Aus der Liste entfernen (Datei bleibt)").clicked() && !self.path.is_empty() {
+            if ui.button(tr("Save as")).clicked() { self.open(Dlg::SaveAs(stem(&self.path))) }
+            if ui.button(tr("Remove")).on_hover_text(tr("Remove from the list (the file stays)")).clicked() && !self.path.is_empty() {
                 let p = self.path.clone();
                 self.st.recent.retain(|r| *r != p);
                 self.profiles.retain(|r| *r != p);
@@ -947,7 +1017,7 @@ impl App {
             return;
         }
         let used = *b != Button::default();
-        let hint = if used { format!("{}\nRechtsklick: Belegung entfernen", elem_name(set, e)) } else { elem_name(set, e) };
+        let hint = if used { format!("{}\n{}", elem_name(set, e), tr("Right-click: remove assignment")) } else { elem_name(set, e) };
         let r = cell(ui, title, &summary(b), active.contains(&e), size).on_hover_text(hint);
         if r.clicked() {
             self.open(Dlg::Button(e));
@@ -955,7 +1025,7 @@ impl App {
         let mut clear = false;
         if used {
             r.context_menu(|ui| {
-                if ui.button("🗑 Belegung entfernen").clicked() {
+                if ui.button(format!("🗑 {}", tr("Remove assignment"))).clicked() {
                     clear = true;
                     ui.close();
                 }
@@ -990,7 +1060,7 @@ impl App {
         if self.show_live {
             let sticks = self.p.sets[self.cur()].sticks.clone();
             let trail = &mut self.trail;
-            card(ui, &format!("Live · {hz} Upd/s"), |ui| controller(ui, &phys, vigem.then_some(&out), &sticks, trail));
+            card(ui, &format!("{} · {hz} {}", tr("Live"), tr("upd/s")), |ui| controller(ui, &phys, vigem.then_some(&out), &sticks, trail));
         }
         let full = ui.available_width();
         let cols = if full > 700.0 { 3 } else if full > 460.0 { 2 } else { 1 };
@@ -1005,11 +1075,11 @@ impl App {
                             0 | 1 => {
                                 let s = b;
                                 let sname = self.p.sets[self.cur()].sticks[s as usize].name.clone();
-                                card(ui, if sname.is_empty() { STICK_NAMES[s as usize] } else { &sname }, |ui| {
+                                card(ui, if sname.is_empty() { tr(STICK_NAMES[s as usize]) } else { &sname }, |ui| {
                                     let centre = active.iter().any(|e| matches!(e, Elem::Stick(x, _) if *x == s));
-                                    self.dir_grid(ui, |d| Elem::Stick(s, d), "⚙ Stick", Dlg::Stick(s), active, centre);
+                                    self.dir_grid(ui, |d| Elem::Stick(s, d), &format!("⚙ {}", tr("Stick")), Dlg::Stick(s), active, centre);
                                     let w = ui.available_width();
-                                    self.btn_cell(ui, Elem::StickMod(s), "Modifier", vec2(w, 40.0), active);
+                                    self.btn_cell(ui, Elem::StickMod(s), tr("Modifier"), vec2(w, 40.0), active);
                                 });
                             }
                             2 => {
@@ -1020,7 +1090,7 @@ impl App {
                                 });
                             }
                             3 => {
-                                card(ui, "Trigger", |ui| {
+                                card(ui, tr("Triggers"), |ui| {
                                     for t in 0..2u8 {
                                         let a = &self.p.sets[self.cur()].triggers[t as usize];
                                         let neg = a.throttle < 0;
@@ -1034,14 +1104,14 @@ impl App {
                                                 self.btn_cell(ui, Elem::Trig(t, false), "−", vec2(w / 2.0 - 4.0, 44.0), active);
                                                 self.btn_cell(ui, Elem::Trig(t, true), "+", vec2(w / 2.0 - 4.0, 44.0), active);
                                             } else {
-                                                self.btn_cell(ui, Elem::Trig(t, true), "Drücken", vec2(w, 44.0), active);
+                                                self.btn_cell(ui, Elem::Trig(t, true), tr("Press"), vec2(w, 44.0), active);
                                             }
                                         });
                                     }
                                 });
                             }
                             _ => {
-                                card(ui, "Buttons", |ui| {
+                                card(ui, tr("Buttons"), |ui| {
                                     let w = ((ui.available_width() - 12.0) / 3.0).max(60.0);
                                     egui::Grid::new("buttons").spacing([6.0, 6.0]).show(ui, |ui| {
                                         for i in 0..11u8 {
@@ -1060,14 +1130,14 @@ impl App {
     }
 
     fn kbm_tab(&mut self, ui: &mut egui::Ui, active: &[Elem]) {
-        card(ui, "Tastatur & Maus → Belegung", |ui| {
-            ui.weak("Echte Tasten/Maustasten lösen Aktionen aus – z. B. Controller-Buttons für Maus-&-Tastatur-Spieler.");
+        card(ui, tr("Keyboard & mouse → assignment"), |ui| {
+            ui.weak(tr("Real keys / mouse buttons trigger actions – e.g. controller buttons for mouse & keyboard players."));
             let mut remove = None;
             let n = self.p.sets[self.cur()].keys.len();
             for i in 0..n {
                 ui.horizontal(|ui| {
                     let vk = self.p.sets[self.cur()].keys[i].vk;
-                    let label = if self.capturing(Cap::KeyBind(i)) { "Taste drücken…".into() } else { format!("⌨ {}", winio::key_name(vk)) };
+                    let label = if self.capturing(Cap::KeyBind(i)) { tr("Press a key…").into() } else { format!("⌨ {}", winio::key_name(vk)) };
                     if ui.add(egui::Button::new(label).min_size(vec2(130.0, 30.0))).clicked() { self.cap = Some((Cap::KeyBind(i), false)) }
                     ui.label("→");
                     let w = (ui.available_width() - 36.0).max(80.0);
@@ -1079,75 +1149,75 @@ impl App {
                 self.set().keys.remove(i);
                 self.cap = None;
             }
-            if ui.button("＋ Belegung").clicked() {
+            if ui.button(format!("＋ {}", tr("Assignment"))).clicked() {
                 self.set().keys.push(KeyBind { vk: 0x20, btn: Button::out(Act::Pad(Out::A)) });
             }
         });
         ui.add_space(6.0);
         let aim = &mut self.p.mouse_aim;
-        card(ui, "Maus → Stick", |ui| {
+        card(ui, tr("Mouse → stick"), |ui| {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut aim.enabled, "Aktiv");
-                ui.selectable_value(&mut aim.stick, VStick::Right, "Rechter Stick");
-                ui.selectable_value(&mut aim.stick, VStick::Left, "Linker Stick");
+                ui.checkbox(&mut aim.enabled, tr("Active"));
+                ui.selectable_value(&mut aim.stick, VStick::Right, tr("Right stick"));
+                ui.selectable_value(&mut aim.stick, VStick::Left, tr("Left stick"));
             });
-            rg("Sensitivität").show(ui, &mut aim.sens, 0.05..=5.0);
-            rg("Glättung").show(ui, &mut aim.smooth, 0.0..=0.95);
-            rg("Anti-Deadzone").show(ui, &mut aim.deadzone, 0.0..=0.5);
-            rg("Mess-Fenster").log().suffix(" ms").show(ui, &mut aim.window_ms, 0.125..=8.0)
-                .on_hover_text("Zeitraum, über den die Mausbewegung gemittelt wird. ≈ 1000 ÷ Maus-Abfragerate: 1 ms bei 1000 Hz, 2 ms bei 500 Hz, 0,25 ms bei 4000 Hz. Kleiner = direkter, zu klein = zittrig.");
+            rg(tr("Sensitivity")).show(ui, &mut aim.sens, 0.05..=5.0);
+            rg(tr("Smoothing")).show(ui, &mut aim.smooth, 0.0..=0.95);
+            rg(tr("Anti-deadzone")).show(ui, &mut aim.deadzone, 0.0..=0.5);
+            rg(tr("Sample window")).log().suffix(" ms").show(ui, &mut aim.window_ms, 0.125..=8.0)
+                .on_hover_text(tr("Time the mouse movement is averaged over. ≈ 1000 ÷ mouse polling rate: 1 ms at 1000 Hz, 2 ms at 500 Hz, 0.25 ms at 4000 Hz. Smaller = more direct, too small = jittery."));
         });
     }
 
     fn bottom(&mut self, ui: &mut egui::Ui) {
         let cur = self.cur();
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Sets").weak());
+            ui.label(RichText::new(tr("Sets")).weak());
             for i in 0..8 {
                 let name = &self.p.set_names[i];
-                let r = ui.selectable_label(cur == i, format!("{}", i + 1)).on_hover_text(if name.is_empty() { format!("Set {}", i + 1) } else { name.clone() });
+                let r = ui.selectable_label(cur == i, format!("{}", i + 1)).on_hover_text(if name.is_empty() { format!("{} {}", tr("Set"), i + 1) } else { name.clone() });
                 if r.clicked() { *self.s.set_cmd.lock().unwrap() = Some(i) }
             }
             ui.separator();
-            if ui.button("Quick Set").clicked() {
+            if ui.button(tr("Quick set")).clicked() {
                 let held = self.s.live.lock().unwrap().active.clone();
                 self.open(Dlg::QuickSet(held));
             }
-            if ui.button("Namen").clicked() { self.open(Dlg::Names) }
-            if ui.button("Pref").clicked() { self.open(Dlg::Pref) }
-            if ui.button("Zurücksetzen").clicked() { self.open(Dlg::Reset) }
+            if ui.button(tr("Names")).clicked() { self.open(Dlg::Names) }
+            if ui.button(tr("Profile")).clicked() { self.open(Dlg::Pref) }
+            if ui.button(tr("Reset")).clicked() { self.open(Dlg::Reset) }
         });
         let (st, status, vigem) = { let l = self.s.live.lock().unwrap(); (l.stats, l.status.clone(), l.vigem) };
-        if !vigem && status.starts_with("ViGEmBus fehlt") {
+        if !vigem && status == engine::VIGEM_MISSING {
             let msg = self.vigem_msg.lock().unwrap().clone();
             let busy = msg.as_deref() == Some(INSTALLING);
             ui.horizontal(|ui| {
-                let b = ui.add_enabled(!busy, egui::Button::new(if busy { INSTALLING } else { "ViGEmBus installieren" }))
-                    .on_hover_text("Treiber für den virtuellen Xbox-Controller (von Nefarius, signiert). Windows fragt einmal nach Admin-Rechten. padmimic verbindet sich danach von selbst.");
+                let b = ui.add_enabled(!busy, egui::Button::new(tr(if busy { INSTALLING } else { "Install ViGEmBus" })))
+                    .on_hover_text(tr("Driver for the virtual Xbox controller (by Nefarius, signed). Windows asks once for admin rights. padmimic connects by itself afterwards."));
                 if b.clicked() {
                     let m = self.vigem_msg.clone();
                     *m.lock().unwrap() = Some(INSTALLING.into());
                     std::thread::spawn(move || {
                         let r = match winio::install_vigem() {
-                            Ok(false) => "ViGEmBus installiert – verbindet sich in wenigen Sekunden".into(),
-                            Ok(true) => "ViGEmBus installiert – bitte Windows neu starten".into(),
+                            Ok(false) => "ViGEmBus installed – connecting in a few seconds".into(),
+                            Ok(true) => "ViGEmBus installed – please restart Windows".into(),
                             Err(e) => e,
                         };
                         *m.lock().unwrap() = Some(r);
                     });
                 }
-                if let Some(m) = msg.filter(|m| m != INSTALLING) { ui.small(m); }
+                if let Some(m) = msg.filter(|m| m != INSTALLING) { ui.small(tr(&m)); }
             });
         }
         ui.horizontal(|ui| {
-            ui.small(status);
+            ui.small(tr(&status));
             ui.label(RichText::new(format!(
                 "PAD {} · {} UPD/S · ENGINE {} HZ · VIRT {}",
                 st.slot.map_or("–".into(), |i| format!("#{}", i + 1)), st.pad_hz, st.loop_hz,
                 st.virt_slot.map_or("–".into(), |i| format!("#{}", i + 1))
             )).font(mono(11.0)).color(pal(ui.visuals().dark_mode).weak));
             if let Some((t, at)) = &self.toast {
-                if at.elapsed() < Duration::from_secs(3) { ui.small(RichText::new(t).color(accent(ui.visuals().dark_mode))); }
+                if at.elapsed() < Duration::from_secs(3) { ui.small(RichText::new(t.as_str()).color(accent(ui.visuals().dark_mode))); }
             }
         });
     }
@@ -1158,35 +1228,39 @@ impl App {
         let list = self.dlgs.clone();
         let mut close = vec![];
         for (i, d) in list.iter().enumerate() {
+            if *d == Dlg::Latency {
+                if !self.latency_window(ctx) { close.push(d.clone()) }
+                continue;
+            }
             let mut open = true;
             let (title, width) = match d {
-                Dlg::Button(e) => (format!("Belegung – {}", elem_name(&self.p.sets[self.cur()], *e)), 640.0),
-                Dlg::Advanced(e) => (format!("Erweitert – {}", elem_name(&self.p.sets[self.cur()], *e)), 660.0),
-                Dlg::Stick(s) => (STICK_NAMES[*s as usize].to_string(), 520.0),
+                Dlg::Button(e) => (format!("{} – {}", tr("Assignment"), elem_name(&self.p.sets[self.cur()], *e)), 640.0),
+                Dlg::Advanced(e) => (format!("{} – {}", tr("Advanced"), elem_name(&self.p.sets[self.cur()], *e)), 660.0),
+                Dlg::Stick(s) => (tr(STICK_NAMES[*s as usize]).to_string(), 560.0),
                 Dlg::DPad => ("D-Pad".into(), 380.0),
-                Dlg::Axis(t) => (format!("Achse {}", TRIG_NAMES[*t as usize]), 420.0),
-                Dlg::Mouse(_) => ("Maus-Einstellungen".into(), 460.0),
-                Dlg::Names => ("Set-Namen".into(), 320.0),
-                Dlg::Pref => ("Profil-Einstellungen".into(), 360.0),
-                Dlg::QuickSet(_) => ("Quick Set".into(), 320.0),
-                Dlg::Settings => ("Einstellungen".into(), 600.0),
-                Dlg::SaveAs(_) => ("Speichern unter".into(), 320.0),
-                Dlg::Reset => ("Zurücksetzen".into(), 320.0),
-                Dlg::About => ("Über padmimic".into(), 340.0),
-                Dlg::Latency => ("Latenz-Messung".into(), 560.0),
+                Dlg::Axis(t) => (format!("{} {}", tr("Axis"), TRIG_NAMES[*t as usize]), 420.0),
+                Dlg::Mouse(_) => (tr("Mouse settings").into(), 760.0),
+                Dlg::Names => (tr("Set names").into(), 320.0),
+                Dlg::Pref => (tr("Profile settings").into(), 380.0),
+                Dlg::QuickSet(_) => (tr("Quick set").into(), 320.0),
+                Dlg::Settings => (tr("Settings").into(), 640.0),
+                Dlg::SaveAs(_) => (tr("Save as").into(), 320.0),
+                Dlg::Reset => (tr("Reset").into(), 360.0),
+                Dlg::About => (tr("About padmimic").into(), 360.0),
+                Dlg::Latency => (tr("Latency meter").into(), 560.0),
             };
             let mut done = false;
             egui::Window::new(title)
                 .id(egui::Id::new(("dlg", i, format!("{:?}", std::mem::discriminant(d)))))
                 .open(&mut open)
                 .collapsible(false)
-                .resizable(false)
-                .default_width(width)
+                .auto_sized() // grows with its content, so nothing is cut off
+                .min_width(width)
                 .pivot(Align2::CENTER_TOP)
                 .default_pos(Pos2::new(ctx.content_rect().center().x + i as f32 * 18.0, 40.0 + i as f32 * 18.0))
                 .show(ctx, |ui| {
                     let max_h = ctx.content_rect().height() - 110.0;
-                    egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, |ui| done = match d.clone() {
+                    egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| done = match d.clone() {
                         Dlg::Button(e) => self.dlg_button(ui, e),
                         Dlg::Advanced(e) => self.dlg_advanced(ui, e),
                         Dlg::Stick(s) => self.dlg_stick(ui, s),
@@ -1200,7 +1274,7 @@ impl App {
                         Dlg::SaveAs(_) => self.dlg_save_as(ui, i),
                         Dlg::Reset => self.dlg_reset(ui),
                         Dlg::About => self.dlg_about(ui),
-                        Dlg::Latency => self.dlg_latency(ui),
+                        Dlg::Latency => true, // own window, see latency_window
                     });
                 });
             if !open || done { close.push(d.clone()) }
@@ -1211,7 +1285,7 @@ impl App {
     fn ok_row(ui: &mut egui::Ui) -> bool {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(egui::Button::new(RichText::new("Fertig").color(Color32::WHITE)).fill(accent(ui.visuals().dark_mode)).min_size(vec2(84.0, 28.0))).clicked()
+                ui.add(egui::Button::new(RichText::new(tr("Done")).color(Color32::WHITE)).fill(accent(ui.visuals().dark_mode)).min_size(vec2(84.0, 28.0))).clicked()
             })
             .inner
         })
@@ -1225,7 +1299,7 @@ impl App {
         let mut open_mouse = false;
         let mut tab = self.pick_tab;
         let Some(b) = self.set().button_mut(e) else { return true };
-        ui.weak("Klicke eine Taste, Maus- oder Controller-Ausgabe – oder „Aufnehmen“ und drücke eine echte Taste bzw. einen Controller-Button.");
+        ui.weak(tr("Click a key, mouse or controller output – or “Record” and press a real key or controller button."));
         let first = b.slots.iter().find_map(|s| if let Slot::Out(a) = s { Some(*a) } else { None });
         if let Some(a) = act_picker(ui, &mut tab, first, numpad) {
             b.slots = vec![Slot::Out(a)];
@@ -1233,26 +1307,26 @@ impl App {
         ui.separator();
         let mut cap = false;
         ui.horizontal(|ui| {
-            cap = ui.button(if capturing { "Drücken…" } else { "⏺ Aufnehmen" }).clicked();
+            cap = ui.button(if capturing { tr("Press…").to_string() } else { format!("⏺ {}", tr("Record")) }).clicked();
             // everything off: outputs, turbo, toggle, set change, name
-            if ui.button("🗑 Entfernen").on_hover_text("Ganze Belegung entfernen").clicked() { *b = Button::default() }
-            ui.checkbox(&mut b.toggle, "Toggle");
-            ui.checkbox(&mut b.turbo, "Turbo");
+            if ui.button(format!("🗑 {}", tr("Remove"))).on_hover_text(tr("Remove the whole assignment")).clicked() { *b = Button::default() }
+            ui.checkbox(&mut b.toggle, tr("Toggle"));
+            ui.checkbox(&mut b.turbo, tr("Turbo"));
         });
         egui::Grid::new("names").num_columns(2).show(ui, |ui| {
-            ui.label("Name:");
+            ui.label(tr("Name:"));
             ui.text_edit_singleline(&mut b.name);
             ui.end_row();
-            ui.label("Aktion:");
+            ui.label(tr("Action:"));
             ui.text_edit_singleline(&mut b.action);
             ui.end_row();
-            ui.label("Slots:");
+            ui.label(tr("Slots:"));
             ui.label(RichText::new(summary(&Button { action: String::new(), ..b.clone() })).strong());
             ui.end_row();
         });
         let done = ui.horizontal(|ui| {
-            open_adv = ui.button("Erweitert…").clicked();
-            open_mouse = ui.button("Maus-Einstellungen…").clicked();
+            open_adv = ui.button(tr("Advanced…")).clicked();
+            open_mouse = ui.button(tr("Mouse settings…")).clicked();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| Self::ok_row(ui)).inner
         }).inner;
         self.pick_tab = tab;
@@ -1275,79 +1349,79 @@ impl App {
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(120.0);
-                for (i, l) in ["Zuweisungen", "Toggle", "Turbo", "Set-Auswahl"].into_iter().enumerate() {
-                    ui.selectable_value(&mut page, i as u8, l);
+                for (i, l) in ["Assignments", "Toggle", "Turbo", "Set selection"].into_iter().enumerate() {
+                    ui.selectable_value(&mut page, i as u8, tr(l));
                 }
             });
-            ui.separator();
+            ui.add_space(10.0); // no vertical separator: it takes all available height and stretches the dialog
             ui.vertical(|ui| match page {
                 0 => {
                     egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
-                        if b.slots.is_empty() { ui.weak("Keine Slots"); }
+                        if b.slots.is_empty() { ui.weak(tr("No slots")); }
                         for (i, s) in b.slots.iter().enumerate() {
                             if ui.selectable_label(sel == i, format!("{}. {}", i + 1, slot_text(s))).clicked() { sel = i }
                         }
                     });
                     ui.horizontal(|ui| {
-                        if ui.button("Einfügen").clicked() {
+                        if ui.button(tr("Insert")).clicked() {
                             let at = (sel + 1).min(b.slots.len());
                             b.slots.insert(at, Slot::Out(Act::Key(0x20)));
                             sel = at;
                         }
-                        if ui.button("Löschen").clicked() && sel < b.slots.len() {
+                        if ui.button(tr("Delete")).clicked() && sel < b.slots.len() {
                             b.slots.remove(sel);
                             sel = sel.saturating_sub(1);
                         }
-                        if ui.button("Alle löschen").clicked() { b.slots.clear() }
+                        if ui.button(tr("Delete all")).clicked() { b.slots.clear() }
                         if ui.button("↑").clicked() && sel > 0 && sel < b.slots.len() { b.slots.swap(sel, sel - 1); sel -= 1 }
                         if ui.button("↓").clicked() && sel + 1 < b.slots.len() { b.slots.swap(sel, sel + 1); sel += 1 }
                     });
                     if let Some(s) = b.slots.get_mut(sel) {
                         ui.separator();
                         let mut ty = s.type_index();
-                        egui::ComboBox::from_label("Slot-Typ").selected_text(Slot::TYPES[ty]).show_ui(ui, |ui| {
-                            for (i, t) in Slot::TYPES.iter().enumerate() { ui.selectable_value(&mut ty, i, *t); }
+                        egui::ComboBox::from_label(tr("Slot type")).selected_text(tr(Slot::TYPES[ty])).show_ui(ui, |ui| {
+                            for (i, t) in Slot::TYPES.iter().enumerate() { ui.selectable_value(&mut ty, i, tr(t)); }
                         });
                         if ty != s.type_index() { *s = Slot::from_type(ty) }
                         let (help, _) = slot_help(s);
-                        ui.weak(help);
+                        ui.weak(tr(help));
                         match s {
                             Slot::Out(a) => {
                                 if let Some(n) = act_picker(ui, &mut tab, Some(*a), numpad) { *a = n }
-                                if ui.button(if capturing_slot == Some(sel) { "Drücken…" } else { "⏺ Aufnehmen" }).clicked() { cap_slot = Some(sel) }
+                                if ui.button(if capturing_slot == Some(sel) { tr("Press…").to_string() } else { format!("⏺ {}", tr("Record")) }).clicked() { cap_slot = Some(sel) }
                             }
-                            Slot::Pause(ms) => { ms_field(ui, "Zeit:", ms, 600_000); }
-                            Slot::Hold(ms) => { ms_field(ui, "Zeit:", ms, 600_000); }
-                            Slot::Delay(ms) => { ms_field(ui, "Zeit:", ms, 600_000); }
-                            Slot::Release(ms) => { ms_field(ui, "Zeit:", ms, 600_000); }
-                            Slot::PressTime(ms) => { ms_field(ui, "Zeit:", ms, 600_000); }
-                            Slot::Distance(p) => { rg("Distanz").suffix(" %").show(ui, p, 1..=100); }
-                            Slot::MouseMod(p) => { rg("Maus-Tempo").suffix(" %").show(ui, p, 1..=400); }
+                            Slot::Pause(ms) => { ms_field(ui, tr("Time"), ms, 600_000); }
+                            Slot::Hold(ms) => { ms_field(ui, tr("Time"), ms, 600_000); }
+                            Slot::Delay(ms) => { ms_field(ui, tr("Time"), ms, 600_000); }
+                            Slot::Release(ms) => { ms_field(ui, tr("Time"), ms, 600_000); }
+                            Slot::PressTime(ms) => { ms_field(ui, tr("Time"), ms, 600_000); }
+                            Slot::Distance(p) => { rg(tr("Distance")).suffix(" %").show(ui, p, 1..=100); }
+                            Slot::MouseMod(p) => { rg(tr("Mouse speed")).suffix(" %").show(ui, p, 1..=400); }
                             Slot::Cycle => {
                                 let mut on = b.cycle_reset.is_some();
                                 let mut v = b.cycle_reset.unwrap_or(1000) as f32 / 1000.0;
-                                ui.checkbox(&mut on, "Zyklus automatisch zurücksetzen");
-                                ui.add_enabled_ui(on, |ui| rg("Zurücksetzen nach").suffix(" s").log().show(ui, &mut v, 0.01..=60.0));
+                                ui.checkbox(&mut on, tr("Reset the cycle automatically"));
+                                ui.add_enabled_ui(on, |ui| rg(tr("Reset after")).suffix(" s").log().show(ui, &mut v, 0.01..=60.0));
                                 b.cycle_reset = on.then_some((v * 1000.0) as u32);
                             }
                             Slot::SetChange(n) => {
-                                egui::ComboBox::from_label("Set").selected_text(set_label(&set_names, *n as usize)).show_ui(ui, |ui| {
+                                egui::ComboBox::from_label(tr("Set")).selected_text(set_label(&set_names, *n as usize)).show_ui(ui, |ui| {
                                     for i in 0..8u8 { ui.selectable_value(n, i, set_label(&set_names, i as usize)); }
                                 });
                             }
                             Slot::Text(t) => { ui.text_edit_singleline(t); }
                             Slot::Exec { path, args } => {
                                 egui::Grid::new("exec").num_columns(2).show(ui, |ui| {
-                                    ui.label("Programm:");
+                                    ui.label(tr("Program:"));
                                     ui.text_edit_singleline(path);
                                     ui.end_row();
-                                    ui.label("Argumente:");
+                                    ui.label(tr("Arguments:"));
                                     ui.text_edit_singleline(args);
                                     ui.end_row();
                                 });
                             }
                             Slot::Load(p) => {
-                                egui::ComboBox::from_label("Profil").selected_text(stem(p)).show_ui(ui, |ui| {
+                                egui::ComboBox::from_label(tr("Profile")).selected_text(stem(p)).show_ui(ui, |ui| {
                                     for pr in &profiles { ui.selectable_value(p, pr.clone(), stem(pr)); }
                                 });
                             }
@@ -1355,38 +1429,38 @@ impl App {
                     }
                 }
                 1 => {
-                    ui.checkbox(&mut b.toggle, "Aktiviert");
-                    ui.weak("Erster Druck hält die Belegung gedrückt, der nächste lässt sie los.");
+                    ui.checkbox(&mut b.toggle, tr("Enabled"));
+                    ui.weak(tr("First press holds the assignment down, the next one releases it."));
                 }
                 2 => {
-                    ui.checkbox(&mut b.turbo, "Aktiviert");
+                    ui.checkbox(&mut b.turbo, tr("Enabled"));
                     let mut m = b.turbo_mode.unwrap_or(TurboMode::Normal);
-                    egui::ComboBox::from_label("Modus").selected_text(match m { TurboMode::Normal => "Normal", TurboMode::Gradient => "Gradient", TurboMode::Pulse => "Puls" }).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut m, TurboMode::Normal, "Normal");
-                        ui.selectable_value(&mut m, TurboMode::Gradient, "Gradient");
-                        ui.selectable_value(&mut m, TurboMode::Pulse, "Puls");
+                    egui::ComboBox::from_label(tr("Mode")).selected_text(tr(match m { TurboMode::Normal => "Normal", TurboMode::Gradient => "Gradient", TurboMode::Pulse => "Pulse" })).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut m, TurboMode::Normal, tr("Normal"));
+                        ui.selectable_value(&mut m, TurboMode::Gradient, tr("Gradient"));
+                        ui.selectable_value(&mut m, TurboMode::Pulse, tr("Pulse"));
                     });
                     b.turbo_mode = (m != TurboMode::Normal).then_some(m);
                     let mut ms = b.turbo_interval();
-                    let l = format!("Verzögerung  ·  Rate {:.1}/s", 1000.0 / ms as f32);
+                    let l = format!("{}  ·  {} {:.1}/s", tr("Delay"), tr("Rate"), 1000.0 / ms as f32);
                     secs_slider(ui, &mut ms, 2, 4000, l);
                     if ms != b.turbo_interval() { b.turbo_ms = ms } // just looking keeps 0 = default
-                    ui.weak("Gradient: Druckdauer folgt dem Achsenweg. Puls: Frequenz folgt dem Achsenweg.");
+                    ui.weak(tr("Gradient: press length follows the axis travel. Pulse: frequency follows the axis travel."));
                 }
                 _ => {
                     let label = |v: Option<(u8, SetCond)>| match v {
-                        None => "Deaktiviert".to_string(),
-                        Some((s, c)) => format!("{} {}", set_label(&set_names, s as usize), match c { SetCond::OneWay => "einseitig", SetCond::TwoWay => "zweiseitig", SetCond::WhileHeld => "solange gehalten" }),
+                        None => tr("Disabled").to_string(),
+                        Some((s, c)) => format!("{} {}", set_label(&set_names, s as usize), tr(match c { SetCond::OneWay => "one-way", SetCond::TwoWay => "two-way", SetCond::WhileHeld => "while held" })),
                     };
-                    egui::ComboBox::from_label("Set wechseln").width(240.0).selected_text(label(b.set)).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut b.set, None, "Deaktiviert");
+                    egui::ComboBox::from_label(tr("Change set")).width(240.0).selected_text(label(b.set)).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut b.set, None, tr("Disabled"));
                         for s in 0..8u8 {
                             for c in [SetCond::OneWay, SetCond::TwoWay, SetCond::WhileHeld] {
                                 ui.selectable_value(&mut b.set, Some((s, c)), label(Some((s, c))));
                             }
                         }
                     });
-                    ui.weak("Einseitig: wechselt beim Loslassen. Zweiseitig: derselbe Button wechselt im Ziel-Set zurück. Solange gehalten: zurück beim Loslassen.");
+                    ui.weak(tr("One-way: switches on release. Two-way: the same button switches back in the target set. While held: back on release."));
                 }
             });
         });
@@ -1399,9 +1473,9 @@ impl App {
 
     fn presets(ui: &mut egui::Ui, id: &str, items: &[&str]) -> Option<usize> {
         let mut pick = None;
-        egui::ComboBox::new(id, "Vorlagen").selected_text("Auswählen…").show_ui(ui, |ui| {
+        egui::ComboBox::new(id, tr("Presets")).selected_text(tr("Choose…")).show_ui(ui, |ui| {
             for (i, it) in items.iter().enumerate() {
-                if ui.selectable_label(false, *it).clicked() { pick = Some(i) }
+                if ui.selectable_label(false, tr(it)).clicked() { pick = Some(i) }
             }
         });
         pick
@@ -1433,8 +1507,8 @@ impl App {
     }
 
     fn dir_mode_combo(ui: &mut egui::Ui, id: &str, m: &mut DirMode) {
-        egui::ComboBox::new(id, "Modus").selected_text(DirMode::ALL.iter().find(|x| x.0 == *m).unwrap().1).show_ui(ui, |ui| {
-            for (v, l) in DirMode::ALL { ui.selectable_value(m, v, l); }
+        egui::ComboBox::new(id, tr("Mode")).selected_text(tr(DirMode::ALL.iter().find(|x| x.0 == *m).unwrap().1)).show_ui(ui, |ui| {
+            for (v, l) in DirMode::ALL { ui.selectable_value(m, v, tr(l)); }
         });
     }
 
@@ -1444,7 +1518,7 @@ impl App {
         let mut open_mod = false;
         let mut open_mouse = false;
         let s = &mut self.set().sticks[si as usize];
-        const PRESETS: [&str; 10] = ["Maus (normal)", "Maus (horizontal invertiert)", "Maus (vertikal invertiert)", "Maus (beide invertiert)", "Pfeiltasten", "W | A | S | D", "Nummernblock", "Keine", "🎮 Virtueller linker Stick", "🎮 Virtueller rechter Stick"];
+        const PRESETS: [&str; 10] = ["Mouse (normal)", "Mouse (horizontal inverted)", "Mouse (vertical inverted)", "Mouse (both inverted)", "Arrow keys", "W | A | S | D", "Numpad", "None", "🎮 Virtual left stick", "🎮 Virtual right stick"];
         if let Some(i) = Self::presets(ui, "stickpre", &PRESETS) {
             match i {
                 8 => { s.dirs = Default::default(); s.analog = Some(VStick::Left) }
@@ -1458,37 +1532,37 @@ impl App {
                 let e = eval_stick(s, x as i32, y as i32);
                 egui::Grid::new("stickvals").num_columns(2).show(ui, |ui| {
                     ui.weak("X / Y:"); ui.label(format!("{x} / {y}")); ui.end_row();
-                    ui.weak("Distanz:"); ui.label(format!("{:.0}", e.raw)); ui.end_row();
-                    ui.weak("Richtung:"); ui.label(format!("{:.0}°", e.bearing)); ui.end_row();
-                    ui.weak("% Safe Zone:"); ui.label(format!("{:.0} %", e.radial * 100.0)); ui.end_row();
+                    ui.weak(tr("Distance:")); ui.label(format!("{:.0}", e.raw)); ui.end_row();
+                    ui.weak(tr("Direction:")); ui.label(format!("{:.0}°", e.bearing)); ui.end_row();
+                    ui.weak(tr("% safe zone:")); ui.label(format!("{:.0} %", e.radial * 100.0)); ui.end_row();
                 });
             });
             ui.vertical(|ui| {
                 Self::dir_mode_combo(ui, "stickmode", &mut s.mode);
-                rg("Tote Zone").show(ui, &mut s.dead, 1..=32737);
-                rg("Max. Zone").show(ui, &mut s.max, 1..=32737);
-                ui.add_enabled_ui(matches!(s.mode, DirMode::Standard | DirMode::EightWay), |ui| rg("Diagonal-Bereich").suffix("°").show(ui, &mut s.diag, 1..=90));
-                rg("Square Stick").suffix(" %").show(ui, &mut s.square, 0..=100);
-                rg("Stick-Verzögerung").suffix(" ms").show(ui, &mut s.delay, 0..=1000);
-                rg("Modifier-Zone").show(ui, &mut s.mod_zone, 1..=32737);
+                rg(tr("Dead zone")).show(ui, &mut s.dead, 1..=32737);
+                rg(tr("Max zone")).show(ui, &mut s.max, 1..=32737);
+                ui.add_enabled_ui(matches!(s.mode, DirMode::Standard | DirMode::EightWay), |ui| rg(tr("Diagonal range")).suffix("°").show(ui, &mut s.diag, 1..=90));
+                rg(tr("Square stick")).suffix(" %").show(ui, &mut s.square, 0..=100);
+                rg(tr("Stick delay")).suffix(" ms").show(ui, &mut s.delay, 0..=1000);
+                rg(tr("Modifier zone")).show(ui, &mut s.mod_zone, 1..=32737);
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut s.mod_inv, "Modifier-Zone invertieren");
-                    open_mod = ui.button(format!("Modifier: {}", summary(&s.modifier))).clicked();
+                    ui.checkbox(&mut s.mod_inv, tr("Invert modifier zone"));
+                    open_mod = ui.button(format!("{}: {}", tr("Modifier"), summary(&s.modifier))).clicked();
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Analog →");
-                    ui.selectable_value(&mut s.analog, None, "Aus");
+                    ui.label(format!("{} →", tr("Analog")));
+                    ui.selectable_value(&mut s.analog, None, tr("Off"));
                     ui.selectable_value(&mut s.analog, Some(VStick::Left), "🎮 L-Stick");
                     ui.selectable_value(&mut s.analog, Some(VStick::Right), "🎮 R-Stick");
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Name:");
+                    ui.label(tr("Name:"));
                     ui.text_edit_singleline(&mut s.name);
                 });
             });
         });
         let done = ui.horizontal(|ui| {
-            open_mouse = ui.button("Maus-Einstellungen…").clicked();
+            open_mouse = ui.button(tr("Mouse settings…")).clicked();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| Self::ok_row(ui)).inner
         }).inner;
         if open_mod { self.open(Dlg::Button(Elem::StickMod(si))) }
@@ -1499,15 +1573,15 @@ impl App {
     fn dlg_dpad(&mut self, ui: &mut egui::Ui) -> bool {
         let mut open_mouse = false;
         let d = &mut self.set().dpad;
-        const PRESETS: [&str; 8] = ["Maus (normal)", "Maus (horizontal invertiert)", "Maus (vertikal invertiert)", "Maus (beide invertiert)", "Pfeiltasten", "W | A | S | D", "Nummernblock", "Keine"];
+        const PRESETS: [&str; 8] = ["Mouse (normal)", "Mouse (horizontal inverted)", "Mouse (vertical inverted)", "Mouse (both inverted)", "Arrow keys", "W | A | S | D", "Numpad", "None"];
         if let Some(i) = Self::presets(ui, "dpadpre", &PRESETS) { Self::apply_dir_preset(&mut d.dirs, i); }
         let mut m = d.mode.unwrap_or(DirMode::Standard);
         Self::dir_mode_combo(ui, "dpadmode", &mut m);
         d.mode = (m != DirMode::Standard).then_some(m);
-        rg("D-Pad-Verzögerung").suffix(" ms").show(ui, &mut d.delay, 0..=1000);
-        ui.horizontal(|ui| { ui.label("Name:"); ui.text_edit_singleline(&mut d.name); });
+        rg(tr("D-pad delay")).suffix(" ms").show(ui, &mut d.delay, 0..=1000);
+        ui.horizontal(|ui| { ui.label(tr("Name:")); ui.text_edit_singleline(&mut d.name); });
         let done = ui.horizontal(|ui| {
-            open_mouse = ui.button("Maus-Einstellungen…").clicked();
+            open_mouse = ui.button(tr("Mouse settings…")).clicked();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| Self::ok_row(ui)).inner
         }).inner;
         if open_mouse { self.open(Dlg::Mouse(MouseTarget::DPad)) }
@@ -1518,7 +1592,7 @@ impl App {
         let raw = { let l = self.s.live.lock().unwrap(); if t == 0 { l.phys.left_trigger } else { l.phys.right_trigger } };
         let (mut open_p, mut open_n, mut open_mouse) = (false, false, false);
         let a = &mut self.set().triggers[t as usize];
-        const PRESETS: [&str; 13] = ["Maus (horizontal)", "Maus (horizontal invertiert)", "Maus (vertikal)", "Maus (vertikal invertiert)", "Pfeile ↑ | ↓", "Pfeile ← | →", "W | S", "A | D", "Num 8 | 2", "Num 4 | 6", "Keine", "🎮 Virtueller LT", "🎮 Virtueller RT"];
+        const PRESETS: [&str; 13] = ["Mouse (horizontal)", "Mouse (horizontal inverted)", "Mouse (vertical)", "Mouse (vertical inverted)", "Arrows ↑ | ↓", "Arrows ← | →", "W | S", "A | D", "Num 8 | 2", "Num 4 | 6", "None", "🎮 Virtual LT", "🎮 Virtual RT"];
         if let Some(i) = Self::presets(ui, "axispre", &PRESETS) {
             let k = |c: u16| Act::Key(c);
             let pair = match i {
@@ -1533,15 +1607,15 @@ impl App {
             a.n = n;
             a.p = p;
         }
-        let names = ["Negativ halb", "Negativ", "Normal", "Positiv", "Positiv halb"];
-        egui::ComboBox::from_label("Throttle").selected_text(names[(a.throttle + 2) as usize]).show_ui(ui, |ui| {
-            for (i, n) in names.iter().enumerate() { ui.selectable_value(&mut a.throttle, i as i8 - 2, *n); }
+        let names = ["Negative half", "Negative", "Normal", "Positive", "Positive half"];
+        egui::ComboBox::from_label(tr("Throttle")).selected_text(tr(names[(a.throttle + 2) as usize])).show_ui(ui, |ui| {
+            for (i, n) in names.iter().enumerate() { ui.selectable_value(&mut a.throttle, i as i8 - 2, tr(n)); }
         });
-        rg("Tote Zone").show(ui, &mut a.dead, 0..=32737);
-        rg("Max. Zone").show(ui, &mut a.max, 1..=32737);
+        rg(tr("Dead zone")).show(ui, &mut a.dead, 0..=32737);
+        rg(tr("Max zone")).show(ui, &mut a.max, 1..=32737);
         let v = engine::throttle(raw as i32 * 32767 / 255, a.throttle);
         ui.horizontal(|ui| {
-            ui.label("Aktueller Wert:");
+            ui.label(tr("Current value:"));
             ui.add(egui::ProgressBar::new((v as f32 + 32767.0) / 65534.0).text(format!("{v}")).desired_width(220.0));
         });
         ui.horizontal(|ui| {
@@ -1549,14 +1623,14 @@ impl App {
             open_p = ui.button(format!("+ {}", summary(&a.p))).clicked();
         });
         ui.horizontal(|ui| {
-            ui.label("Analog →");
-            ui.selectable_value(&mut a.analog, None, "Aus");
+            ui.label(format!("{} →", tr("Analog")));
+            ui.selectable_value(&mut a.analog, None, tr("Off"));
             ui.selectable_value(&mut a.analog, Some(VTrigger::Left), "🎮 LT");
             ui.selectable_value(&mut a.analog, Some(VTrigger::Right), "🎮 RT");
         });
-        ui.horizontal(|ui| { ui.label("Name:"); ui.text_edit_singleline(&mut a.name); });
+        ui.horizontal(|ui| { ui.label(tr("Name:")); ui.text_edit_singleline(&mut a.name); });
         let done = ui.horizontal(|ui| {
-            open_mouse = ui.button("Maus-Einstellungen…").clicked();
+            open_mouse = ui.button(tr("Mouse settings…")).clicked();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| Self::ok_row(ui)).inner
         }).inner;
         if open_p { self.open(Dlg::Button(Elem::Trig(t, true))) }
@@ -1580,57 +1654,63 @@ impl App {
         let Some(mut m) = self.set().button(targets[0]).map(|b| b.mouse.clone()) else { return true };
         let before = m.clone();
         egui::Grid::new("mtop").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-            ui.label("Modus:");
+            ui.label(tr("Mode:"));
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut m.mode, MouseMode::Cursor, "Cursor");
-                ui.selectable_value(&mut m.mode, MouseMode::Spring, "Spring");
+                ui.selectable_value(&mut m.mode, MouseMode::Cursor, tr("Cursor"));
+                ui.selectable_value(&mut m.mode, MouseMode::Spring, tr("Spring"));
             });
             ui.end_row();
-            ui.label("Beschleunigung:");
-            egui::ComboBox::from_id_salt("curve").selected_text(Curve::ALL.iter().find(|c| c.0 == m.curve).unwrap().1).show_ui(ui, |ui| {
-                for (c, l) in Curve::ALL { ui.selectable_value(&mut m.curve, c, l); }
+            ui.label(tr("Curve:"));
+            egui::ComboBox::from_id_salt("curve").selected_text(tr(Curve::ALL.iter().find(|c| c.0 == m.curve).unwrap().1)).show_ui(ui, |ui| {
+                for (c, l) in Curve::ALL { ui.selectable_value(&mut m.curve, c, tr(l)); }
             });
             ui.end_row();
         });
-        card(ui, "Maus-Tempo", |ui| {
+        // two columns: the dialog fits without scrolling
+        ui.columns(2, |cols| {
+        let (left, right) = cols.split_at_mut(1);
+        let (ui, ru) = (&mut left[0], &mut right[0]);
+        card(ui, tr("Mouse speed"), |ui| {
             let mut together = m.speed_x == m.speed_y;
-            ui.checkbox(&mut together, "Gemeinsam ändern");
+            ui.checkbox(&mut together, tr("Change together"));
             let ox = m.speed_x;
-            let (lx, ly) = (format!("Horizontal ({} px/s)", m.speed_x as u32 * 20), format!("Vertikal ({} px/s)", m.speed_y as u32 * 20));
+            let (lx, ly) = (format!("{} ({} px/s)", tr("Horizontal"), m.speed_x as u32 * 20), format!("{} ({} px/s)", tr("Vertical"), m.speed_y as u32 * 20));
             rg(&lx).show(ui, &mut m.speed_x, 1..=300);
             rg(&ly).show(ui, &mut m.speed_y, 1..=300);
             if together { if m.speed_x != ox { m.speed_y = m.speed_x } else { m.speed_x = m.speed_y } }
-            rg("Rad horizontal").suffix(" Rasten/s").show(ui, &mut m.wheel_x, 1..=100);
-            rg("Rad vertikal").suffix(" Rasten/s").show(ui, &mut m.wheel_y, 1..=100);
-            ui.add_enabled_ui(m.curve == Curve::Power, |ui| rg("Sensitivität").log().show(ui, &mut m.sens, 0.001..=1000.0));
-            ui.add_enabled_ui(matches!(m.curve, Curve::EasingQuadratic | Curve::EasingCubic), |ui| rg("Easing-Dauer").suffix(" s").show(ui, &mut m.easing, 0.2..=5.0));
+            rg(tr("Wheel horizontal")).suffix(tr(" notches/s")).show(ui, &mut m.wheel_x, 1..=100);
+            rg(tr("Wheel vertical")).suffix(tr(" notches/s")).show(ui, &mut m.wheel_y, 1..=100);
+            ui.add_enabled_ui(m.curve == Curve::Power, |ui| rg(tr("Sensitivity")).log().show(ui, &mut m.sens, 0.001..=1000.0));
+            ui.add_enabled_ui(matches!(m.curve, Curve::EasingQuadratic | Curve::EasingCubic), |ui| rg(tr("Easing duration")).suffix(" s").show(ui, &mut m.easing, 0.2..=5.0));
         });
-        card(ui, "", |ui| {
-            ui.checkbox(&mut m.accel, RichText::new("Delta-Beschleunigung").strong());
+        card(ru, "", |ui| {
+            ui.checkbox(&mut m.accel, RichText::new(tr("Delta acceleration")).strong());
             ui.add_enabled_ui(m.accel, |ui| {
-                rg("Multiplikator").suffix("×").show(ui, &mut m.accel_mult, 1.0..=200.0);
-                rg("Start").suffix(" %").show(ui, &mut m.accel_start, 0.0..=100.0);
-                rg("Min. Schwelle").suffix(" %").show(ui, &mut m.accel_min, 0.0..=100.0);
-                rg("Max. Schwelle").suffix(" %").show(ui, &mut m.accel_max, 0.0..=100.0);
-                rg("Extra-Dauer").suffix(" s").show(ui, &mut m.accel_dur, 0.0..=5.0);
+                rg(tr("Multiplier")).suffix("×").show(ui, &mut m.accel_mult, 1.0..=200.0);
+                rg(tr("Start")).suffix(" %").show(ui, &mut m.accel_start, 0.0..=100.0);
+                rg(tr("Min threshold")).suffix(" %").show(ui, &mut m.accel_min, 0.0..=100.0);
+                rg(tr("Max threshold")).suffix(" %").show(ui, &mut m.accel_max, 0.0..=100.0);
+                rg(tr("Extra duration")).suffix(" s").show(ui, &mut m.accel_dur, 0.0..=5.0);
                 ui.horizontal(|ui| {
-                    ui.label("Kurve:");
-                    for (c, l) in [(AccelCurve::Linear, "Linear"), (AccelCurve::EaseOutSine, "Sinus"), (AccelCurve::EaseOutQuad, "Quad"), (AccelCurve::EaseOutCubic, "Kubisch")] {
-                        ui.selectable_value(&mut m.accel_curve, c, l);
+                    ui.label(tr("Curve:"));
+                    for (c, l) in [(AccelCurve::Linear, "Linear"), (AccelCurve::EaseOutSine, "Sine"), (AccelCurve::EaseOutQuad, "Quad"), (AccelCurve::EaseOutCubic, "Cubic")] {
+                        ui.selectable_value(&mut m.accel_curve, c, tr(l));
                     }
                 });
             });
         });
-        card(ui, "Spring", |ui| {
+        ru.add_space(6.0);
+        card(ru, tr("Spring"), |ui| {
             ui.add_enabled_ui(m.mode == MouseMode::Spring, |ui| {
-                rg("Breite").suffix(" px").show(ui, &mut m.spring_w, 0..=16384);
-                rg("Höhe").suffix(" px").show(ui, &mut m.spring_h, 0..=16384);
-                ui.weak("Breite/Höhe 0 = ganzer Bildschirm");
-                rg("Release-Radius").suffix(" %").show(ui, &mut m.spring_release, 0..=100);
-                ui.checkbox(&mut m.spring_rel, "Relativ");
+                rg(tr("Width")).suffix(" px").show(ui, &mut m.spring_w, 0..=16384);
+                rg(tr("Height")).suffix(" px").show(ui, &mut m.spring_h, 0..=16384);
+                ui.weak(tr("Width/height 0 = whole screen"));
+                rg(tr("Release radius")).suffix(" %").show(ui, &mut m.spring_release, 0..=100);
+                ui.checkbox(&mut m.spring_rel, tr("Relative"));
             });
         });
-        ui.weak(format!("Maus-Status: X {:.0} px/s · Y {:.0} px/s", pps.0, pps.1));
+        });
+        ui.weak(format!("{}: X {:.0} px/s · Y {:.0} px/s", tr("Mouse status"), pps.0, pps.1));
         if m != before {
             for e in targets {
                 if let Some(b) = self.set().button_mut(e) { b.mouse = m.clone() }
@@ -1642,7 +1722,7 @@ impl App {
     fn dlg_names(&mut self, ui: &mut egui::Ui) -> bool {
         egui::Grid::new("setnames").num_columns(2).show(ui, |ui| {
             for i in 0..8 {
-                ui.label(format!("Set {}", i + 1));
+                ui.label(format!("{} {}", tr("Set"), i + 1));
                 ui.text_edit_singleline(&mut self.p.set_names[i]);
                 ui.end_row();
             }
@@ -1651,13 +1731,13 @@ impl App {
     }
 
     fn dlg_pref(&mut self, ui: &mut egui::Ui) -> bool {
-        secs_slider(ui, &mut self.p.key_press_ms, 1, 1000, "Tasten-Druckzeit".into());
-        ui.horizontal(|ui| { ui.label("Profilname:"); ui.text_edit_singleline(&mut self.p.name); });
+        secs_slider(ui, &mut self.p.key_press_ms, 1, 1000, tr("Key press time").into());
+        ui.horizontal(|ui| { ui.label(tr("Profile name:")); ui.text_edit_singleline(&mut self.p.name); });
         Self::ok_row(ui)
     }
 
     fn dlg_quickset(&mut self, ui: &mut egui::Ui, held: &[Elem]) -> bool {
-        ui.label("Drücke einen Button oder bewege eine Achse am Controller (oder eine belegte Taste). Der passende Editor öffnet sich.");
+        ui.label(tr("Press a button or move an axis on the controller (or an assigned key). The matching editor opens."));
         ui.ctx().request_repaint();
         let active = self.s.live.lock().unwrap().active.clone();
         if let Some(e) = active.into_iter().find(|e| !held.contains(e)) {
@@ -1665,48 +1745,50 @@ impl App {
             return true;
         }
         ui.add_space(4.0);
-        ui.button("Abbrechen").clicked()
+        ui.button(tr("Cancel")).clicked()
     }
 
     fn dlg_settings(&mut self, ui: &mut egui::Ui) -> bool {
         let mut page = self.set_page;
         let toggle_cap = self.capturing(Cap::Toggle);
         let mut cap_toggle = false;
+        let mut pick_lang = None;
         let st = &mut self.st;
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
-                ui.set_width(120.0);
-                for (i, l) in ["Allgemein", "Auto-Profil", "Maus", "Latenz"].into_iter().enumerate() {
-                    ui.selectable_value(&mut page, i as u8, l);
+                ui.set_width(130.0);
+                for (i, l) in ["General", "Language", "Auto profile", "Mouse", "Engine"].into_iter().enumerate() {
+                    ui.selectable_value(&mut page, i as u8, tr(l));
                 }
             });
-            ui.separator();
+            ui.add_space(10.0); // no vertical separator: it takes all available height and stretches the dialog
             ui.vertical(|ui| match page {
                 0 => {
-                    ui.horizontal(|ui| { ui.label("Profil-Ordner:"); ui.text_edit_singleline(&mut st.profile_dir); });
-                    rg("Letzte Profile").show(ui, &mut st.recent_count, 1..=100);
-                    ui.checkbox(&mut st.auto_load_last, "Zuletzt geöffnetes Profil automatisch laden");
-                    ui.checkbox(&mut st.startup, "Mit Windows starten");
-                    ui.checkbox(&mut st.hide_empty, "Leere Buttons ausblenden");
-                    ui.checkbox(&mut st.numpad, "Nummernblock in der Tastatur anzeigen");
+                    ui.horizontal(|ui| { ui.label(tr("Profile folder:")); ui.text_edit_singleline(&mut st.profile_dir); });
+                    rg(tr("Recent profiles")).show(ui, &mut st.recent_count, 1..=100);
+                    ui.checkbox(&mut st.auto_load_last, tr("Load the last profile on start"));
+                    ui.checkbox(&mut st.startup, tr("Start with Windows"));
+                    ui.checkbox(&mut st.hide_empty, tr("Hide empty buttons"));
+                    ui.checkbox(&mut st.numpad, tr("Show the numpad on the keyboard"));
                     ui.horizontal(|ui| {
-                        ui.label("An/Aus-Hotkey:");
-                        let l = if toggle_cap { "Drücken…".into() } else { match st.toggle { Input::Key(k) => winio::key_name(k), Input::Pad(o) => format!("🎮 {}", o.label()) } };
+                        ui.label(tr("On/off hotkey:"));
+                        let l = if toggle_cap { tr("Press…").to_string() } else { match st.toggle { Input::Key(k) => winio::key_name(k), Input::Pad(o) => format!("🎮 {}", o.label()) } };
                         cap_toggle = ui.button(l).clicked();
                     });
-                    card(ui, "Tastenwiederholung", |ui| {
-                        ui.checkbox(&mut st.key_repeat, "Aktiv");
-                        ui.add_enabled_ui(st.key_repeat, |ui| rg("Verzögerung").suffix(" ms").show(ui, &mut st.key_repeat_delay, 0..=1000));
-                        ui.add_enabled_ui(st.key_repeat, |ui| rg("Rate").suffix("/s").show(ui, &mut st.key_repeat_rate, 5..=250));
+                    card(ui, tr("Key repeat"), |ui| {
+                        ui.checkbox(&mut st.key_repeat, tr("Active"));
+                        ui.add_enabled_ui(st.key_repeat, |ui| rg(tr("Delay")).suffix(" ms").show(ui, &mut st.key_repeat_delay, 0..=1000));
+                        ui.add_enabled_ui(st.key_repeat, |ui| rg(tr("Rate")).suffix("/s").show(ui, &mut st.key_repeat_rate, 5..=250));
                     });
                 }
-                1 => {
-                    ui.weak("Lädt automatisch ein Profil, sobald das Programm im Vordergrund ist.");
-                    ui.checkbox(&mut st.auto_profile, "Aktiv");
+                1 => pick_lang = lang_grid(ui, i18n::cur(), &[]),
+                2 => {
+                    ui.weak(tr("Loads a profile automatically as soon as the program is in the foreground."));
+                    ui.checkbox(&mut st.auto_profile, tr("Active"));
                     let mut remove = None;
                     for (i, a) in st.auto_profiles.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut a.exe).hint_text("spiel.exe").desired_width(140.0));
+                            ui.add(egui::TextEdit::singleline(&mut a.exe).hint_text("game.exe").desired_width(140.0));
                             ui.label("→");
                             egui::ComboBox::from_id_salt(("ap", i)).width(160.0).selected_text(stem(&a.profile)).show_ui(ui, |ui| {
                                 for p in &self.profiles { ui.selectable_value(&mut a.profile, p.clone(), stem(p)); }
@@ -1716,51 +1798,86 @@ impl App {
                     }
                     if let Some(i) = remove { st.auto_profiles.remove(i); }
                     ui.horizontal(|ui| {
-                        if ui.button("＋ Hinzufügen").clicked() { st.auto_profiles.push(AutoProfile { exe: String::new(), profile: String::new() }) }
-                        if ui.button("Aktuelles Vordergrund-Programm").on_hover_text("Nach 3 s wird das aktive Programm eingetragen").clicked() {
+                        if ui.button(format!("＋ {}", tr("Add"))).clicked() { st.auto_profiles.push(AutoProfile { exe: String::new(), profile: String::new() }) }
+                        if ui.button(tr("Current foreground program")).on_hover_text(tr("The active program is filled in after 3 s")).clicked() {
                             st.auto_profiles.push(AutoProfile { exe: "…".into(), profile: self.path.clone() });
                         }
                     });
                 }
-                2 => {
-                    ui.checkbox(&mut st.disable_epp, "Windows „Zeigerbeschleunigung verbessern“ deaktivieren");
-                    card(ui, "Glättung", |ui| {
-                        ui.checkbox(&mut st.smoothing, "Aktiv");
-                        ui.add_enabled_ui(st.smoothing, |ui| rg("Verlaufsgröße").show(ui, &mut st.history, 1..=100));
-                        ui.add_enabled_ui(st.smoothing, |ui| rg("Gewichtung").show(ui, &mut st.weight, 0.0..=1.0));
+                3 => {
+                    ui.checkbox(&mut st.disable_epp, tr("Turn off Windows “Enhance pointer precision”"));
+                    card(ui, tr("Smoothing"), |ui| {
+                        ui.checkbox(&mut st.smoothing, tr("Active"));
+                        ui.add_enabled_ui(st.smoothing, |ui| rg(tr("History size")).show(ui, &mut st.history, 1..=100));
+                        ui.add_enabled_ui(st.smoothing, |ui| rg(tr("Weight")).show(ui, &mut st.weight, 0.0..=1.0));
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("Maus-Refresh:");
-                        egui::ComboBox::from_id_salt("mref").selected_text(format!("{} ms", st.mouse_refresh)).show_ui(ui, |ui| {
-                            for v in 1..=16 { ui.selectable_value(&mut st.mouse_refresh, v, format!("{v} ms")); }
-                        });
-                    });
+                    rg(tr("Mouse refresh")).suffix(" ms").show(ui, &mut st.mouse_refresh, 1..=16);
                 }
                 _ => {
                     ui.horizontal(|ui| {
-                        ui.label("Controller-Polling:");
+                        ui.label(tr("Controller polling:"));
                         egui::ComboBox::from_id_salt("hz").selected_text(format!("{} Hz", st.hz)).show_ui(ui, |ui| {
                             for hz in [125, 250, 500, 1000, 2000, 4000, 8000] { ui.selectable_value(&mut st.hz, hz, format!("{hz} Hz")); }
                         });
                     });
-                    ui.weak("Wie oft Controller, Tastatur und Maus gelesen und Ausgaben gesendet werden (hochauflösender Timer, Thread mit höchster Priorität).");
-                    ui.weak("Echten Controller mit HidHide verstecken und padmimic.exe dort freigeben, damit Spiele nur den virtuellen Pad sehen.");
+                    ui.weak(tr("How often controller, keyboard and mouse are read and outputs are sent (high-resolution timer, highest thread priority)."));
+                    ui.weak(tr("Hide the real controller with HidHide and allow padmimic.exe there, so games only see the virtual pad."));
                 }
             });
         });
         self.set_page = page;
         if cap_toggle { self.cap = Some((Cap::Toggle, false)) }
+        if let Some(l) = pick_lang { self.set_lang(ui.ctx(), l) }
         let mut done = false;
+        ui.separator();
         ui.horizontal(|ui| {
-            if ui.button("Standard").clicked() { self.st = Settings { recent: self.st.recent.clone(), last_profile: self.st.last_profile.clone(), ..Settings::default() } }
+            if ui.button(tr("Defaults")).clicked() { self.st = Settings { recent: self.st.recent.clone(), last_profile: self.st.last_profile.clone(), lang: self.st.lang.clone(), ..Settings::default() } }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| done = Self::ok_row(ui));
         });
         done
     }
 
+    fn set_lang(&mut self, ctx: &egui::Context, l: usize) {
+        i18n::set(l);
+        self.st.lang = i18n::LANGS[l].0.into();
+        set_fonts(ctx);
+    }
+
+    /// First start: offer the language of where the user is, without saying why.
+    fn lang_prompt(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.lang_prompt else { return };
+        let mut pick = None;
+        egui::Modal::new(egui::Id::new("lang_prompt")).show(ctx, |ui| {
+            let c = pal(ui.visuals().dark_mode);
+            ui.set_width(400.0);
+            ui.vertical_centered(|ui| {
+                ui.add_space(4.0);
+                ui.label(RichText::new(i18n::tr_in(id, "Change language?")).font(mono(19.0)).color(c.acc));
+                ui.label(RichText::new("Change language?").small().color(c.weak));
+                ui.add_space(10.0);
+                let big = egui::Button::new(RichText::new(i18n::native(id)).size(17.0).color(Color32::BLACK)).fill(c.acc).min_size(vec2(260.0, 38.0));
+                if ui.add(big).clicked() { pick = Some(id) }
+                if ui.add(egui::Button::new(i18n::tr_in(id, "Keep English")).min_size(vec2(260.0, 30.0))).clicked() { pick = Some(0) }
+                ui.add_space(6.0);
+                let more = format!("{} {}", if self.lang_more { "−" } else { "+" }, i18n::tr_in(id, "Other languages"));
+                if ui.add(egui::Label::new(RichText::new(more).color(c.weak)).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.lang_more = !self.lang_more;
+                }
+            });
+            if self.lang_more {
+                ui.add_space(4.0);
+                if let Some(l) = lang_grid(ui, usize::MAX, &[id, 0]) { pick = Some(l) }
+            }
+        });
+        if let Some(l) = pick {
+            self.set_lang(ctx, l);
+            self.lang_prompt = None;
+        }
+    }
+
     fn dlg_save_as(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
         let Some(Dlg::SaveAs(name)) = self.dlgs.get_mut(idx) else { return true };
-        ui.horizontal(|ui| { ui.label("Name:"); ui.text_edit_singleline(name); });
+        ui.horizontal(|ui| { ui.label(tr("Name:")); ui.text_edit_singleline(name); });
         let name = name.trim().to_string();
         if Self::ok_row(ui) && !name.is_empty() {
             let path = std::path::Path::new(&self.st.profile_dir).join(format!("{name}.json")).display().to_string();
@@ -1771,40 +1888,69 @@ impl App {
     }
 
     fn dlg_reset(&mut self, ui: &mut egui::Ui) -> bool {
-        ui.label("Was soll zurückgesetzt werden?");
+        ui.label(tr("What should be reset?"));
         let mut done = false;
         ui.horizontal(|ui| {
-            if ui.button("Aktuelles Set leeren").clicked() { *self.set() = Set::default(); done = true }
-            if ui.button("Ganzes Profil auf Standard").clicked() { self.p = Profile::default(); done = true }
-            if ui.button("Abbrechen").clicked() { done = true }
+            if ui.button(tr("Clear current set")).clicked() { *self.set() = Set::default(); done = true }
+            if ui.button(tr("Whole profile to default")).clicked() { self.p = Profile::default(); done = true }
+            if ui.button(tr("Cancel")).clicked() { done = true }
         });
         done
     }
 
     fn dlg_about(&mut self, ui: &mut egui::Ui) -> bool {
         ui.label(RichText::new(format!("padmimic {}", env!("CARGO_PKG_VERSION"))).strong());
-        ui.label("Controller, Tastatur & Maus → Tastatur, Maus und virtueller Xbox-360-Controller.");
-        ui.weak("Belegungslogik (Slots, Turbo, Sets, Zonen, Kurven) nach dem Vorbild von AntiMicroX.");
+        ui.label(tr("Controller, keyboard & mouse → keyboard, mouse and a virtual Xbox 360 controller."));
+        ui.weak(tr("Mapping logic (slots, turbo, sets, zones, curves) modelled on AntiMicroX."));
         Self::ok_row(ui)
     }
 
-    fn dlg_latency(&mut self, ui: &mut egui::Ui) -> bool {
+    /// Latency meter in its own window, so it can sit next to the game while padmimic stays small.
+    fn latency_window(&mut self, ctx: &egui::Context) -> bool {
+        let mut open = true;
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("latency"),
+            egui::ViewportBuilder::default().with_title(format!("padmimic · {}", tr("Latency meter"))).with_inner_size([600.0, 380.0]).with_min_inner_size([460.0, 300.0]).with_decorations(false),
+            |vui, _| {
+                let ctx = vui.ctx().clone();
+                window_edges(&ctx);
+                let c = pal(ctx.theme() == Theme::Dark);
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(c.panel).inner_margin(14)).show(vui, |ui| {
+                    // own small title bar: drag anywhere on it, close on the right
+                    let row = Rect::from_min_size(ui.cursor().min - vec2(14.0, 14.0), vec2(ui.available_width() + 28.0, 44.0));
+                    let bar = ui.interact(row, ui.id().with("latbar"), Sense::click_and_drag());
+                    if bar.drag_started_by(egui::PointerButton::Primary) { ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag) }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(tr("Latency meter").to_uppercase()).font(mono(15.0)).color(c.acc));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if win_btn(ui, WinBtn::Close) { open = false }
+                        });
+                    });
+                    ui.add_space(4.0);
+                    self.latency_body(ui);
+                });
+                if ctx.input(|i| i.viewport().close_requested()) { open = false }
+            },
+        );
+        open
+    }
+
+    fn latency_body(&mut self, ui: &mut egui::Ui) {
         let (lat, stats) = { let l = self.s.live.lock().unwrap(); (l.lat.clone(), l.stats) };
-        ui.weak("Zum Vergleichen: „Zurücksetzen“, 10–20 s den Stick kreisen lassen, Werte notieren. Dann z. B. antimicro starten und dasselbe wiederholen.");
-        ui.label(format!(
-            "Läuft seit {:.0} s · Engine-Ziel {} Hz · erreicht {} Hz · Genauigkeit ±{:.2} ms (ein Takt)",
-            lat.since.elapsed().as_secs_f32(), self.st.hz, stats.loop_hz, 1000.0 / self.st.hz.max(1) as f32
-        ));
+        ui.weak(tr("To compare: “Reset”, circle the stick for 10–20 s, note the values. Then e.g. start antimicro and repeat."));
+        ui.label(trf("Running {} s · engine target {} Hz · reached {} Hz · accuracy ±{} ms (one tick)", &[
+            &format!("{:.0}", lat.since.elapsed().as_secs_f32()), &self.st.hz, &stats.loop_hz, &format!("{:.2}", 1000.0 / self.st.hz.max(1) as f32),
+        ]));
         let ms = |us: f64| format!("{:.2} ms", us / 1000.0);
         egui::Grid::new("lat").num_columns(5).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
-            for h in ["", "Werte", "Ø", "99 %", "Max"] { ui.strong(h); }
+            for h in ["", tr("Samples"), "Ø", "99 %", tr("Max")] { ui.strong(h); }
             ui.end_row();
             for (name, help, h) in [
-                ("Controller-Daten", "Abstand zwischen zwei neuen Meldungen des echten Controllers. Zählt nur, während du ihn bewegst. Klein und gleichmäßig = gut.", &lat.pad),
-                ("Engine-Takt", "Echter Abstand zwischen zwei Durchläufen von padmimic. Hohe Max-Werte heißen: Windows oder ein anderes Programm hat die Engine kurz aufgehalten.", &lat.tick),
-                ("Weg zum virtuellen Pad", "Vom Senden an ViGEm, bis der virtuelle Controller die Änderung über XInput zeigt. So früh kann ein Spiel sie frühestens sehen.", &lat.virt),
+                ("Controller data", "Gap between two new reports of the real controller. Only counts while you move it. Small and even = good.", &lat.pad),
+                ("Engine tick", "Real gap between two runs of padmimic. High max values mean Windows or another program held the engine up for a moment.", &lat.tick),
+                ("Path to the virtual pad", "From sending to ViGEm until the virtual controller shows the change through XInput. The earliest a game can see it.", &lat.virt),
             ] {
-                ui.label(name).on_hover_text(help);
+                ui.label(tr(name)).on_hover_text(tr(help));
                 if h.n == 0 {
                     for _ in 0..4 { ui.weak("–"); }
                 } else {
@@ -1817,17 +1963,12 @@ impl App {
             }
         });
         if lat.pad.n > 0 {
-            ui.label(format!("Der Controller liefert beim Bewegen ≈ {:.0} neue Meldungen pro Sekunde.", 1e6 / lat.pad.avg()));
+            ui.label(trf("While moving, the controller sends ≈ {} new reports per second.", &[&format!("{:.0}", 1e6 / lat.pad.avg())]));
         }
         if stats.virt_slot.is_none() {
-            ui.weak("Kein virtuelles Pad (ViGEmBus nicht installiert oder nicht erkannt): die dritte Zeile bleibt leer.");
+            ui.weak(tr("No virtual pad (ViGEmBus not installed or not detected): the third row stays empty."));
         }
-        let mut done = false;
-        ui.horizontal(|ui| {
-            if ui.button("Zurücksetzen").clicked() { self.s.live.lock().unwrap().lat = engine::Lat::default() }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| done = Self::ok_row(ui));
-        });
-        done
+        if ui.button(tr("Reset")).clicked() { self.s.live.lock().unwrap().lat = engine::Lat::default() }
     }
 
     // ------------------------------------------------------------- background work
@@ -1871,24 +2012,24 @@ impl App {
 }
 
 fn set_label(names: &[String; 8], i: usize) -> String {
-    if names[i].is_empty() { format!("Set {}", i + 1) } else { format!("Set {} ({})", i + 1, names[i]) }
+    if names[i].is_empty() { format!("{} {}", tr("Set"), i + 1) } else { format!("{} {} ({})", tr("Set"), i + 1, names[i]) }
 }
 
 fn slot_help(s: &Slot) -> (&'static str, ()) {
     (match s {
-        Slot::Out(_) => "Taste, Maustaste, Mausbewegung, Rad oder Controller-Ausgabe. Aufeinanderfolgende Slots werden gleichzeitig gedrückt.",
-        Slot::Cycle => "Slots nach dem Zyklus laufen beim nächsten Druck. Mehrere Zyklen teilen eine Sequenz in Abschnitte.",
-        Slot::Delay(_) => "Verzögert den nächsten Slot. Bereits aktive Slots bleiben gedrückt.",
-        Slot::Distance(_) => "Folgende Slots sind nur aktiv, wenn die Achse so weit über die tote Zone bewegt wird.",
-        Slot::Exec { .. } => "Startet ein Programm, wenn der Slot erreicht wird.",
-        Slot::Hold(_) => "Folgende Slots laufen nur, wenn der Button so lange gehalten wird.",
-        Slot::Load(_) => "Lädt ein Profil, wenn der Slot erreicht wird.",
-        Slot::MouseMod(_) => "Ändert alle Maus-Tempos um diesen Prozentsatz, solange aktiv – z. B. langsamer beim Zielen.",
-        Slot::Pause(_) => "Pause zwischen Tastendrücken: vorherige Tasten werden losgelassen.",
-        Slot::PressTime(_) => "Wie lange Tasten nach diesem Slot gedrückt gehalten werden.",
-        Slot::Release(_) => "Folgende Slots laufen beim Loslassen, wenn der Button mindestens so lange gehalten wurde.",
-        Slot::SetChange(_) => "Wechselt zum gewählten Set, wenn der Slot erreicht wird.",
-        Slot::Text(_) => "Tippt den ganzen Text, wenn der Slot erreicht wird.",
+        Slot::Out(_) => "Key, mouse button, mouse movement, wheel or controller output. Consecutive slots are pressed together.",
+        Slot::Cycle => "Slots after the cycle run on the next press. Several cycles split a sequence into parts.",
+        Slot::Delay(_) => "Delays the next slot. Slots already active stay pressed.",
+        Slot::Distance(_) => "Following slots are only active when the axis moves this far past the dead zone.",
+        Slot::Exec { .. } => "Starts a program when the slot is reached.",
+        Slot::Hold(_) => "Following slots only run if the button is held this long.",
+        Slot::Load(_) => "Loads a profile when the slot is reached.",
+        Slot::MouseMod(_) => "Scales all mouse speeds by this percentage while active – e.g. slower while aiming.",
+        Slot::Pause(_) => "Pause between key presses: previous keys are released.",
+        Slot::PressTime(_) => "How long keys after this slot are held down.",
+        Slot::Release(_) => "Following slots run on release if the button was held at least this long.",
+        Slot::SetChange(_) => "Switches to the chosen set when the slot is reached.",
+        Slot::Text(_) => "Types the whole text when the slot is reached.",
     }, ())
 }
 
@@ -1909,10 +2050,10 @@ impl eframe::App for App {
             self.header(ui);
             self.profile_bar(ui);
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Controller, "🎮 Controller");
-                ui.selectable_value(&mut self.tab, Tab::Kbm, "⌨ Tastatur & Maus");
+                ui.selectable_value(&mut self.tab, Tab::Controller, format!("🎮 {}", tr("Controller")));
+                ui.selectable_value(&mut self.tab, Tab::Kbm, format!("⌨ {}", tr("Keyboard & mouse")));
                 if self.tab == Tab::Controller {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.checkbox(&mut self.show_live, "Live-Ansicht"); });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.checkbox(&mut self.show_live, tr("Live view")); });
                 }
             });
         });
@@ -1925,6 +2066,7 @@ impl eframe::App for App {
         });
         let ctx = ui.ctx().clone();
         self.dialogs(&ctx);
+        self.lang_prompt(&ctx);
         self.sync();
     }
 

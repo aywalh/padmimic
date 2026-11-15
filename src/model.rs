@@ -70,8 +70,8 @@ pub enum Slot {
 
 impl Slot {
     pub const TYPES: [&'static str; 13] = [
-        "Taste / Maus / Pad", "Zyklus", "Verzögerung", "Distanz", "Ausführen", "Halten", "Profil laden",
-        "Maus-Mod", "Pause", "Druckzeit", "Loslassen", "Set-Wechsel", "Texteingabe",
+        "Key / mouse / pad", "Cycle", "Delay", "Distance", "Execute", "Hold", "Load profile",
+        "Mouse mod", "Pause", "Press time", "Release", "Set change", "Text entry",
     ];
     pub fn type_index(&self) -> usize {
         match self {
@@ -105,9 +105,9 @@ pub enum Curve { EnhancedPrecision, Linear, Quadratic, Cubic, QuadraticExtreme, 
 
 impl Curve {
     pub const ALL: [(Curve, &'static str); 8] = [
-        (Curve::EnhancedPrecision, "Erhöhte Präzision"), (Curve::Linear, "Linear"), (Curve::Quadratic, "Quadratisch"),
-        (Curve::Cubic, "Kubisch"), (Curve::QuadraticExtreme, "Quadratisch extrem"), (Curve::Power, "Potenzfunktion"),
-        (Curve::EasingQuadratic, "Easing quadratisch"), (Curve::EasingCubic, "Easing kubisch"),
+        (Curve::EnhancedPrecision, "Enhanced precision"), (Curve::Linear, "Linear"), (Curve::Quadratic, "Quadratic"),
+        (Curve::Cubic, "Cubic"), (Curve::QuadraticExtreme, "Quadratic extreme"), (Curve::Power, "Power function"),
+        (Curve::EasingQuadratic, "Easing quadratic"), (Curve::EasingCubic, "Easing cubic"),
     ];
 }
 
@@ -181,8 +181,8 @@ pub enum DirMode { Standard, EightWay, FourCardinal, FourDiagonal }
 
 impl DirMode {
     pub const ALL: [(DirMode, &'static str); 4] = [
-        (DirMode::Standard, "Standard"), (DirMode::EightWay, "8-Wege"),
-        (DirMode::FourCardinal, "4-Wege (Achsen)"), (DirMode::FourDiagonal, "4-Wege (Diagonal)"),
+        (DirMode::Standard, "Standard"), (DirMode::EightWay, "8-way"),
+        (DirMode::FourCardinal, "4-way (axes)"), (DirMode::FourDiagonal, "4-way (diagonal)"),
     ];
 }
 
@@ -390,6 +390,8 @@ pub struct Settings {
     pub auto_profile: bool,
     pub auto_profiles: Vec<AutoProfile>,
     pub toggle: Input,
+    /// UI language code ("en", "de", …); empty = not chosen yet, ask on start.
+    pub lang: String,
 }
 
 impl Default for Settings {
@@ -400,6 +402,7 @@ impl Default for Settings {
             key_repeat: false, key_repeat_delay: 660, key_repeat_rate: 25, disable_epp: false,
             smoothing: false, history: 10, weight: 0.2, mouse_refresh: 1, auto_profile: false, auto_profiles: vec![],
             toggle: Input::Key(0x77),
+            lang: String::new(),
         }
     }
 }

@@ -94,6 +94,9 @@ impl Default for Lat {
     }
 }
 
+/// Status text while ViGEmBus is missing (the UI offers to install it).
+pub const VIGEM_MISSING: &str = "ViGEmBus missing – keyboard/mouse output only";
+
 pub enum Event {
     LoadProfile(String),
 }
@@ -998,9 +1001,9 @@ fn connect_pad(s: &Shared, mirrors: bool) -> Option<Xbox360Wired<Client>> {
             let mut l = s.live.lock().unwrap();
             // the real pad can't be hidden from games without a driver (HidHide): say so instead of silently doubling input
             l.status = if mirrors {
-                "Virtuelles Pad verbunden – ⚠ dein echter Controller ist fürs Spiel weiter sichtbar (doppelte Eingabe). Mit HidHide verstecken."
+                "Virtual pad connected – ⚠ your real controller is still visible to games (double input). Hide it with HidHide."
             } else {
-                "Virtueller Xbox 360 Controller verbunden"
+                "Virtual Xbox 360 controller connected"
             }.into();
             l.vigem = true;
             Some(p)
@@ -1008,7 +1011,8 @@ fn connect_pad(s: &Shared, mirrors: bool) -> Option<Xbox360Wired<Client>> {
         Err(e) => {
             LOOKING.store(false, Relaxed);
             let mut l = s.live.lock().unwrap();
-            (l.status, l.vigem) = (format!("ViGEmBus fehlt ({e:?}) – nur Tastatur/Maus-Ausgabe aktiv"), false);
+            let _ = e; // shown in English UI terms; the raw driver error helps nobody
+            (l.status, l.vigem) = (VIGEM_MISSING.into(), false);
             None
         }
     }
@@ -1065,7 +1069,7 @@ fn run(s: Arc<Shared>) {
                 VIRT.store(NONE, Relaxed);
                 vigem_t = Instant::now() - Duration::from_secs(10); // switching on plugs it in at once
                 let mut l = s.live.lock().unwrap();
-                l.status = if uses_pad { "Aus – virtuelles Pad abgesteckt" } else { "Kein virtuelles Pad – der Controller geht direkt ans Spiel" }.into();
+                l.status = if uses_pad { "Off – virtual pad unplugged" } else { "No virtual pad – the controller goes straight to the game" }.into();
                 l.vigem = false;
             }
         }

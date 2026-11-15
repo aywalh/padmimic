@@ -148,12 +148,12 @@ pub fn screen() -> (i32, i32) {
 
 pub fn key_name(vk: u16) -> String {
     let fixed = match vk {
-        0 => "–", 1 => "Maus L", 2 => "Maus R", 4 => "Maus M", 5 => "Maus 4", 6 => "Maus 5",
-        0x08 => "Rücktaste", 0x09 => "Tab", 0x0D => "Enter", 0x10 => "Shift", 0x11 => "Strg", 0x12 => "Alt", 0x13 => "Pause",
-        0x14 => "Caps", 0x1B => "Esc", 0x20 => "Leertaste", 0x21 => "Bild↑", 0x22 => "Bild↓", 0x23 => "Ende", 0x24 => "Pos1",
-        0x25 => "←", 0x26 => "↑", 0x27 => "→", 0x28 => "↓", 0x2C => "Druck", 0x2D => "Einfg", 0x2E => "Entf",
-        0x5B => "Win", 0x5C => "Win R", 0x5D => "Menü", 0x90 => "Num", 0x91 => "Rollen",
-        0xA0 => "Shift L", 0xA1 => "Shift R", 0xA2 => "Strg L", 0xA3 => "Strg R", 0xA4 => "Alt", 0xA5 => "AltGr",
+        0 => "–", 1 => "Mouse L", 2 => "Mouse R", 4 => "Mouse M", 5 => "Mouse 4", 6 => "Mouse 5",
+        0x08 => "Backspace", 0x09 => "Tab", 0x0D => "Enter", 0x10 => "Shift", 0x11 => "Ctrl", 0x12 => "Alt", 0x13 => "Pause",
+        0x14 => "Caps", 0x1B => "Esc", 0x20 => "Space", 0x21 => "PgUp", 0x22 => "PgDn", 0x23 => "End", 0x24 => "Home",
+        0x25 => "←", 0x26 => "↑", 0x27 => "→", 0x28 => "↓", 0x2C => "Print", 0x2D => "Ins", 0x2E => "Del",
+        0x5B => "Win", 0x5C => "Win R", 0x5D => "Menu", 0x90 => "Num", 0x91 => "Scroll",
+        0xA0 => "Shift L", 0xA1 => "Shift R", 0xA2 => "Ctrl L", 0xA3 => "Ctrl R", 0xA4 => "Alt", 0xA5 => "AltGr",
         0x6A => "Num *", 0x6B => "Num +", 0x6D => "Num -", 0x6E => "Num ,", 0x6F => "Num /",
         _ => "",
     };
@@ -215,16 +215,16 @@ exit $p.ExitCode"
         .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .status()
-        .map_err(|e| format!("PowerShell nicht startbar: {e}"))?
+        .map_err(|e| format!("PowerShell could not start: {e}"))?
         .code()
         .unwrap_or(-1);
     match code {
         0 => Ok(false),
         3010 => Ok(true),
-        10 => Err("ViGEmBus: Download fehlgeschlagen – Internetverbindung prüfen".into()),
-        11 => Err("ViGEmBus: Prüfsumme falsch – Datei wurde nicht ausgeführt".into()),
-        12 | 1223 | 1602 => Err("ViGEmBus: Admin-Abfrage abgelehnt oder abgebrochen".into()),
-        c => Err(format!("ViGEmBus-Installer meldet Fehler {c}")),
+        10 => Err("ViGEmBus: download failed – check the internet connection".into()),
+        11 => Err("ViGEmBus: wrong checksum – the file was not run".into()),
+        12 | 1223 | 1602 => Err("ViGEmBus: admin prompt declined or cancelled".into()),
+        c => Err(format!("ViGEmBus installer error {c}")),
     }
 }
 
