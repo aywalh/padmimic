@@ -25,7 +25,8 @@ fn main() -> eframe::Result {
     let app = ui::App::new(s.clone(), st);
     engine::spawn(s);
     let opts = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([820.0, 860.0]).with_min_inner_size([420.0, 520.0]),
+        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([820.0, 860.0]).with_min_inner_size([420.0, 520.0])
+            .with_decorations(false), // own retro title bar in ui::header
         ..Default::default()
     };
     eframe::run_native("padmimic", opts, Box::new(|cc| {

@@ -4,7 +4,7 @@
 use crate::engine::{self, Event, Shared, eval_stick, pad_down};
 use crate::model::*;
 use crate::winio;
-use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Theme, Vec2, vec2};
+use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Theme, Vec2, vec2};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
@@ -12,15 +12,37 @@ use vigem_client::{XButtons, XGamepad};
 
 // ================================================================= look
 
+/// Retro terminal palette, modern spacing: ice-blue cyan for the real controller and "on",
+/// amber for what padmimic itself sends (virtual pad).
+struct Pal { panel: Color32, card: Color32, line: Color32, idle: Color32, hover: Color32, text: Color32, weak: Color32, acc: Color32, amber: Color32 }
+
+fn pal(dark: bool) -> Pal {
+    let c = Color32::from_rgb;
+    if dark {
+        Pal { panel: c(10, 12, 15), card: c(17, 20, 26), line: c(38, 46, 58), idle: c(26, 31, 40), hover: c(36, 44, 56), text: c(214, 226, 222), weak: c(118, 134, 140), acc: c(86, 214, 255), amber: c(255, 181, 71) }
+    } else {
+        Pal { panel: c(232, 226, 210), card: c(244, 239, 226), line: c(196, 186, 162), idle: c(226, 219, 200), hover: c(214, 205, 182), text: c(40, 38, 34), weak: c(120, 112, 96), acc: c(0, 112, 170), amber: c(190, 104, 0) }
+    }
+}
+
 pub fn accent(dark: bool) -> Color32 {
-    if dark { Color32::from_rgb(10, 132, 255) } else { Color32::from_rgb(0, 122, 255) }
+    pal(dark).acc
+}
+
+/// Retro heading / readout text.
+fn mono(s: f32) -> FontId {
+    FontId::monospace(s)
 }
 
 pub fn style(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    if let Ok(data) = std::fs::read(r"C:\Windows\Fonts\segoeui.ttf") {
-        fonts.font_data.insert("ui".into(), Arc::new(egui::FontData::from_owned(data)));
-        fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap().insert(0, "ui".into());
+    for (name, file, fam) in [("ui", "segoeui.ttf", egui::FontFamily::Proportional), ("mono", "CascadiaMono.ttf", egui::FontFamily::Monospace), ("mono2", "consola.ttf", egui::FontFamily::Monospace)] {
+        if let Ok(data) = std::fs::read(format!(r"C:\Windows\Fonts\{file}")) {
+            fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(data)));
+            let list = fonts.families.get_mut(&fam).unwrap();
+            let at = if name == "mono2" { 1.min(list.len()) } else { 0 };
+            list.insert(at, name.into());
+        }
     }
     ctx.set_fonts(fonts);
     ctx.all_styles_mut(|s| {
@@ -28,49 +50,65 @@ pub fn style(ctx: &egui::Context) {
         s.spacing.button_padding = vec2(10.0, 5.0);
         s.spacing.interact_size.y = 24.0;
         s.text_styles.insert(egui::TextStyle::Body, FontId::proportional(14.0));
-        s.text_styles.insert(egui::TextStyle::Button, FontId::proportional(14.0));
+        s.text_styles.insert(egui::TextStyle::Button, mono(13.0));
         s.text_styles.insert(egui::TextStyle::Small, FontId::proportional(11.5));
+        s.text_styles.insert(egui::TextStyle::Heading, mono(18.0));
         let v = &mut s.visuals;
         for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-            w.corner_radius = CornerRadius::same(8);
-            w.bg_stroke = Stroke::NONE;
+            w.corner_radius = CornerRadius::same(4);
         }
-        v.window_corner_radius = CornerRadius::same(14);
-        v.menu_corner_radius = CornerRadius::same(10);
-        v.window_stroke = Stroke::NONE;
+        v.window_corner_radius = CornerRadius::same(6);
+        v.menu_corner_radius = CornerRadius::same(4);
     });
     for (theme, dark) in [(Theme::Light, false), (Theme::Dark, true)] {
         ctx.style_mut_of(theme, |s| {
+            let c = pal(dark);
             let v = &mut s.visuals;
-            let (panel, card, inactive, hover) = if dark {
-                (Color32::from_rgb(28, 28, 30), Color32::from_rgb(44, 44, 46), Color32::from_rgb(58, 58, 60), Color32::from_rgb(72, 72, 74))
-            } else {
-                (Color32::from_rgb(242, 242, 247), Color32::WHITE, Color32::from_rgb(229, 229, 234), Color32::from_rgb(209, 209, 214))
-            };
-            v.panel_fill = panel;
-            v.window_fill = card;
-            v.extreme_bg_color = inactive;
-            v.faint_bg_color = inactive;
-            v.widgets.inactive.weak_bg_fill = inactive;
-            v.widgets.inactive.bg_fill = inactive;
-            v.widgets.hovered.weak_bg_fill = hover;
-            v.widgets.hovered.bg_fill = hover;
-            v.selection.bg_fill = accent(dark);
-            v.selection.stroke.color = Color32::WHITE;
+            v.panel_fill = c.panel;
+            v.window_fill = c.card;
+            v.window_stroke = Stroke::new(1.0, c.line);
+            v.extreme_bg_color = c.idle;
+            v.faint_bg_color = c.idle;
+            v.override_text_color = Some(c.text);
+            v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, c.line);
+            for (w, fill, line) in [(&mut v.widgets.inactive, c.idle, c.line), (&mut v.widgets.hovered, c.hover, c.acc), (&mut v.widgets.active, c.hover, c.acc), (&mut v.widgets.open, c.hover, c.line)] {
+                (w.weak_bg_fill, w.bg_fill, w.bg_stroke) = (fill, fill, Stroke::new(1.0, line));
+            }
+            v.selection.bg_fill = c.acc.gamma_multiply(0.35);
+            v.selection.stroke = Stroke::new(1.0, c.acc);
+            v.hyperlink_color = c.acc;
         });
     }
 }
 
+/// Soft neon halo around a rect.
+fn glow(p: &egui::Painter, r: Rect, radius: f32, c: Color32) {
+    for (w, a) in [(7.0, 0.07), (4.0, 0.14), (2.0, 0.3)] {
+        p.rect_stroke(r.expand(w / 2.0), radius + w / 2.0, Stroke::new(w, c.gamma_multiply(a)), StrokeKind::Outside);
+    }
+}
+
+fn glow_circle(p: &egui::Painter, c: Pos2, r: f32, col: Color32) {
+    for (w, a) in [(7.0, 0.07), (4.0, 0.14), (2.0, 0.3)] {
+        p.circle_stroke(c, r + w / 2.0, Stroke::new(w, col.gamma_multiply(a)));
+    }
+}
+
 fn card<R>(ui: &mut egui::Ui, title: &str, f: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let c = pal(ui.visuals().dark_mode);
     egui::Frame::new()
-        .fill(ui.visuals().window_fill)
-        .corner_radius(14)
+        .fill(c.card)
+        .stroke(Stroke::new(1.0, c.line))
+        .corner_radius(6)
         .inner_margin(12)
         .show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.set_width(ui.available_width());
                 if !title.is_empty() {
-                    ui.label(RichText::new(title).strong().size(13.0));
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("▌").font(mono(13.0)).color(c.acc));
+                        ui.label(RichText::new(title.to_uppercase()).font(mono(12.5)).color(c.weak));
+                    });
                 }
                 f(ui)
             })
@@ -79,34 +117,190 @@ fn card<R>(ui: &mut egui::Ui, title: &str, f: impl FnOnce(&mut egui::Ui) -> R) -
         .inner
 }
 
+/// Retro power switch: LED + ON/OFF.
 fn switch(ui: &mut egui::Ui, on: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(vec2(46.0, 28.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(78.0, 28.0), Sense::click());
+    let c = pal(ui.visuals().dark_mode);
     let t = ui.ctx().animate_bool_responsive(resp.id, on);
-    let r = rect.height() / 2.0;
-    let bg = if on { Color32::from_rgb(52, 199, 89) } else { ui.visuals().widgets.inactive.weak_bg_fill };
-    ui.painter().rect_filled(rect, r, bg);
-    let x = egui::lerp((rect.left() + r)..=(rect.right() - r), t);
-    ui.painter().circle_filled(Pos2::new(x, rect.center().y), r - 2.5, Color32::WHITE);
+    let p = ui.painter();
+    p.rect_filled(rect, 4.0, if resp.hovered() { c.hover } else { c.idle });
+    p.rect_stroke(rect, 4.0, Stroke::new(1.0, if on { c.acc } else { c.line }), StrokeKind::Inside);
+    let led = Pos2::new(rect.left() + 15.0, rect.center().y);
+    let lc = if on { c.acc } else { c.weak.gamma_multiply(0.5) };
+    if on { glow_circle(p, led, 4.0, c.acc.gamma_multiply(t)) }
+    p.circle_filled(led, 4.0, lc);
+    p.text(Pos2::new(rect.left() + 28.0, rect.center().y), Align2::LEFT_CENTER, if on { "AKTIV" } else { "AUS" }, mono(12.5), if on { c.acc } else { c.weak });
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum WinBtn { Min, Max, Restore, Close }
+
+/// Minimize / maximize / close in the own title bar, drawn as lines (no font glyph needed); close lights red.
+fn win_btn(ui: &mut egui::Ui, kind: WinBtn) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 26.0), Sense::click());
+    let c = pal(ui.visuals().dark_mode);
+    let hot = resp.hovered();
+    let col = if kind == WinBtn::Close && hot { Color32::from_rgb(255, 90, 80) } else if hot { c.acc } else { c.weak };
+    let p = ui.painter();
+    if hot {
+        p.rect_filled(rect, 4.0, col.gamma_multiply(0.15));
+        p.rect_stroke(rect, 4.0, Stroke::new(1.0, col), StrokeKind::Inside);
+    }
+    let (m, s) = (rect.center(), Stroke::new(1.4, col));
+    let box_at = |o: Vec2| Rect::from_center_size(m + o, vec2(9.0, 9.0));
+    match kind {
+        WinBtn::Min => { p.hline((m.x - 5.0)..=(m.x + 5.0), m.y + 1.0, s); }
+        WinBtn::Max => { p.rect_stroke(box_at(Vec2::ZERO), 1.0, s, StrokeKind::Inside); }
+        WinBtn::Restore => {
+            p.rect_stroke(box_at(vec2(1.5, -1.5)), 1.0, s, StrokeKind::Inside);
+            p.rect_filled(box_at(vec2(-1.5, 1.5)), 1.0, if hot { col.gamma_multiply(0.15) } else { c.panel });
+            p.rect_stroke(box_at(vec2(-1.5, 1.5)), 1.0, s, StrokeKind::Inside);
+        }
+        WinBtn::Close => {
+            p.line_segment([m + vec2(-4.5, -4.5), m + vec2(4.5, 4.5)], s);
+            p.line_segment([m + vec2(-4.5, 4.5), m + vec2(4.5, -4.5)], s);
+        }
+    }
     resp.clicked()
+}
+
+/// The window has no Windows frame: resize from its edges, and draw a thin border.
+fn window_edges(ctx: &egui::Context) {
+    use egui::{CursorIcon as C, ResizeDirection as D};
+    let r = ctx.content_rect();
+    let c = pal(ctx.theme() == Theme::Dark);
+    let maxed = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+    if !maxed {
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("frame")))
+            .rect_stroke(r, 0.0, Stroke::new(1.0, c.line), StrokeKind::Inside);
+    }
+    let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|_| !maxed) else { return };
+    let m = 6.0;
+    let (l, rt, t, b) = (pos.x < r.left() + m, pos.x > r.right() - m, pos.y < r.top() + m, pos.y > r.bottom() - m);
+    let dir = match (l, rt, t, b) {
+        (true, _, true, _) => Some((D::NorthWest, C::ResizeNorthWest)),
+        (_, true, true, _) => Some((D::NorthEast, C::ResizeNorthEast)),
+        (true, _, _, true) => Some((D::SouthWest, C::ResizeSouthWest)),
+        (_, true, _, true) => Some((D::SouthEast, C::ResizeSouthEast)),
+        (true, ..) => Some((D::West, C::ResizeWest)),
+        (_, true, ..) => Some((D::East, C::ResizeEast)),
+        (_, _, true, _) => Some((D::North, C::ResizeNorth)),
+        (.., true) => Some((D::South, C::ResizeSouth)),
+        _ => None,
+    };
+    if let Some((d, cur)) = dir {
+        ctx.set_cursor_icon(cur);
+        if ctx.input(|i| i.pointer.primary_pressed()) { ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(d)) }
+    }
 }
 
 /// A grid cell like AntiMicro's button widgets: caption + current assignment, lit while pressed.
 fn cell(ui: &mut egui::Ui, title: &str, body: &str, active: bool, size: Vec2) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let dark = ui.visuals().dark_mode;
-    let fill = if active { accent(dark) } else if resp.hovered() { ui.visuals().widgets.hovered.weak_bg_fill } else { ui.visuals().faint_bg_color };
+    let c = pal(ui.visuals().dark_mode);
     let p = ui.painter();
-    p.rect_filled(rect, 10.0, fill);
-    let (tc, bc) = if active { (Color32::from_white_alpha(200), Color32::WHITE) } else { (ui.visuals().weak_text_color(), ui.visuals().strong_text_color()) };
+    let empty = body == "—";
+    if active { glow(p, rect, 4.0, c.acc) }
+    p.rect_filled(rect, 4.0, if active { c.acc.gamma_multiply(0.22) } else if resp.hovered() { c.hover } else { c.idle });
+    p.rect_stroke(rect, 4.0, Stroke::new(1.0, if active || resp.hovered() { c.acc } else { c.line }), StrokeKind::Inside);
+    let (tc, bc) = if active { (c.acc, c.acc) } else { (c.weak, if empty { c.weak.gamma_multiply(0.6) } else { c.text }) };
     let max_chars = ((size.x - 14.0) / 7.0).max(3.0) as usize;
     let body: String = if body.chars().count() > max_chars { body.chars().take(max_chars - 1).chain(['…']).collect() } else { body.into() };
     if title.is_empty() {
         p.text(rect.center(), Align2::CENTER_CENTER, body, FontId::proportional(13.0), bc);
     } else {
-        p.text(rect.left_top() + vec2(8.0, 5.0), Align2::LEFT_TOP, title, FontId::proportional(11.0), tc);
+        p.text(rect.left_top() + vec2(8.0, 5.0), Align2::LEFT_TOP, title, mono(10.5), tc);
         p.text(rect.left_bottom() + vec2(8.0, -5.0), Align2::LEFT_BOTTOM, body, FontId::proportional(13.0), bc);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Retro fader/knob for every number: hover, hold and drag up/down (or left/right) to change it,
+/// Shift for fine steps; a plain click turns it into a text field to type the value
+/// (comma or dot), Enter takes it, Esc cancels.
+struct Regler<'a> { text: &'a str, suffix: &'a str, log: bool, dec: Option<usize> }
+
+fn rg(text: &str) -> Regler<'_> {
+    Regler { text, suffix: "", log: false, dec: None }
+}
+
+impl<'a> Regler<'a> {
+    fn suffix(mut self, s: &'a str) -> Self { self.suffix = s; self }
+    fn log(mut self) -> Self { self.log = true; self }
+    fn dec(mut self, d: usize) -> Self { self.dec = Some(d); self }
+
+    fn show<N: egui::emath::Numeric>(self, ui: &mut egui::Ui, v: &mut N, range: std::ops::RangeInclusive<N>) -> egui::Response {
+        let (lo, hi) = (range.start().to_f64(), range.end().to_f64());
+        let log = self.log && lo > 0.0;
+        let to_t = |x: f64| if log { (x / lo).ln() / (hi / lo).ln() } else { (x - lo) / (hi - lo).max(1e-12) };
+        let from_t = |t: f64| {
+            let t = t.clamp(0.0, 1.0);
+            let x = if log { lo * (hi / lo).powf(t) } else { lo + t * (hi - lo) };
+            if N::INTEGRAL { x.round() } else { x }
+        };
+        let dec = self.dec.unwrap_or(if N::INTEGRAL { 0 } else if hi - lo <= 1.0 { 3 } else if hi - lo <= 20.0 { 2 } else { 1 });
+        let fmt = |x: f64| format!("{x:.dec$}").replace('.', ",");
+        let parse = |s: &str| s.trim().trim_end_matches(self.suffix.trim()).trim().replace(',', ".").parse::<f64>().ok();
+
+        let w = ui.available_width().clamp(180.0, 460.0);
+        let id = ui.auto_id_with(("regler", self.text)); // stable while scrolling, unlike the position
+        let (rect, _) = ui.allocate_exact_size(vec2(w, 28.0), Sense::hover());
+        let edit_id = id.with("edit");
+        let enabled = ui.is_enabled();
+        let mut resp = ui.interact(rect, id, if enabled { Sense::click_and_drag() } else { Sense::hover() });
+        let c = pal(ui.visuals().dark_mode);
+        let mut val = v.to_f64().clamp(lo, hi);
+
+        // typing mode
+        let editing: Option<String> = ui.data(|d| d.get_temp(edit_id));
+        if let Some(mut s) = editing {
+            let te = ui.put(rect, egui::TextEdit::singleline(&mut s).id(edit_id).font(mono(13.0)).horizontal_align(egui::Align::Center));
+            if te.lost_focus() {
+                if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    if let Some(x) = parse(&s) { val = from_t(to_t(x.clamp(lo, hi))); resp.mark_changed() }
+                }
+                ui.data_mut(|d| d.remove::<String>(edit_id));
+            } else {
+                ui.data_mut(|d| d.insert_temp(edit_id, s));
+            }
+            if resp.changed() { *v = N::from_f64(val) }
+            return resp;
+        }
+        if resp.clicked() {
+            ui.data_mut(|d| d.insert_temp(edit_id, fmt(val)));
+            ui.memory_mut(|m| m.request_focus(edit_id));
+        }
+        if resp.drag_started() { ui.data_mut(|d| d.insert_temp(id, to_t(val))); }
+        if resp.dragged() {
+            let d = resp.drag_delta();
+            let fine = if ui.input(|i| i.modifiers.shift) { 0.1 } else { 1.0 };
+            let t: f64 = ui.data(|m| m.get_temp(id)).unwrap_or(to_t(val)) + (d.x - d.y) as f64 / 260.0 * fine;
+            ui.data_mut(|m| m.insert_temp(id, t.clamp(0.0, 1.0)));
+            let nv = from_t(t);
+            if nv != val { val = nv; resp.mark_changed() }
+        }
+        if resp.changed() { *v = N::from_f64(val) } // untouched values stay exactly as loaded
+
+        // look: LED segment meter with label and readout
+        let p = ui.painter();
+        let hot = enabled && (resp.hovered() || resp.dragged());
+        let dim = |x: Color32| if enabled { x } else { x.gamma_multiply(0.45) };
+        p.rect_filled(rect, 4.0, if hot { c.hover } else { c.idle });
+        p.rect_stroke(rect, 4.0, Stroke::new(1.0, if hot { c.acc } else { c.line }), StrokeKind::Inside);
+        let t = to_t(val).clamp(0.0, 1.0) as f32;
+        let meter = Rect::from_min_max(Pos2::new(rect.left() + rect.width() * 0.5, rect.top() + 9.0), Pos2::new(rect.right() - 74.0, rect.bottom() - 9.0));
+        let n = ((meter.width() / 6.0) as usize).max(4);
+        let seg = meter.width() / n as f32;
+        for i in 0..n {
+            let r = Rect::from_min_size(Pos2::new(meter.left() + i as f32 * seg, meter.top()), vec2(seg - 2.0, meter.height()));
+            let lit = (i as f32 + 0.5) / n as f32 <= t;
+            p.rect_filled(r, 1.0, dim(if lit { c.acc } else { c.line }));
+        }
+        p.text(rect.left_center() + vec2(9.0, 0.0), Align2::LEFT_CENTER, self.text, FontId::proportional(13.0), dim(c.text));
+        p.text(rect.right_center() - vec2(9.0, 0.0), Align2::RIGHT_CENTER, format!("{}{}", fmt(val), self.suffix), mono(12.5), dim(if hot { c.acc } else { c.text }));
+        resp.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text("Ziehen = einstellen (Shift = fein) · Klick = Zahl eintippen")
+    }
 }
 
 // ================================================================= text
@@ -295,83 +489,183 @@ fn act_picker(ui: &mut egui::Ui, tab: &mut u8, sel: Option<Act>, numpad: bool) -
 /// or click the number and type it ("0,02" and "0.02" both work).
 fn secs_slider(ui: &mut egui::Ui, ms: &mut u32, min_ms: u32, max_ms: u32, text: String) {
     let mut s = *ms as f64 / 1000.0;
-    ui.add(
-        egui::Slider::new(&mut s, min_ms as f64 / 1000.0..=max_ms as f64 / 1000.0)
-            .logarithmic(true)
-            .suffix(" s")
-            .custom_formatter(|v, _| format!("{v:.3}").replace('.', ","))
-            .custom_parser(|t| t.trim().trim_end_matches('s').trim().replace(',', ".").parse().ok())
-            .text(text),
-    );
-    *ms = ((s * 1000.0).round() as u32).clamp(min_ms, max_ms);
+    if rg(&text).suffix(" s").log().dec(3).show(ui, &mut s, min_ms as f64 / 1000.0..=max_ms as f64 / 1000.0).changed() {
+        *ms = ((s * 1000.0).round() as u32).clamp(min_ms, max_ms);
+    }
 }
 
 fn ms_field(ui: &mut egui::Ui, label: &str, v: &mut u32, max: u32) -> bool {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        let c = ui.add(egui::DragValue::new(v).range(0..=max).speed(5.0).suffix(" ms")).changed();
-        ui.weak(secs(*v));
-        c
-    })
-    .inner
+    rg(label).suffix(" ms").log().show(ui, v, 1..=max).changed()
 }
 
 // ================================================================= controller drawing
 
-fn controller(ui: &mut egui::Ui, g: &XGamepad) {
-    let w = ui.available_width().min(280.0);
-    let (resp, p) = ui.allocate_painter(vec2(ui.available_width(), w * 0.58), Sense::hover());
-    let o = resp.rect.min + vec2((resp.rect.width() - w) / 2.0, 0.0);
+/// Last stick positions (normalized, y up) for the motion trail in the live view.
+pub type Trail = [std::collections::VecDeque<(f32, f32)>; 2];
+
+/// Live view: the real controller in phosphor green, padmimic's virtual pad output in amber.
+/// Sticks show dead zone and max zone of the current set plus a short motion trail.
+fn controller(ui: &mut egui::Ui, g: &XGamepad, out: Option<&XGamepad>, sticks: &[Stick; 2], trail: &mut Trail) {
+    let w = ui.available_width().min(400.0);
+    let h = w * 0.56;
+    let (resp, p) = ui.allocate_painter(vec2(ui.available_width(), h + 30.0), Sense::hover());
+    let o = resp.rect.min + vec2((resp.rect.width() - w) / 2.0, 4.0);
     let at = |x: f32, y: f32| o + vec2(x * w, y * w);
-    let dark = ui.visuals().dark_mode;
-    let (body, idle, cap) = if dark {
-        (Color32::from_rgb(58, 58, 60), Color32::from_rgb(86, 86, 90), Color32::from_rgb(30, 30, 32))
-    } else {
-        (Color32::from_rgb(229, 229, 234), Color32::from_rgb(199, 199, 204), Color32::WHITE)
-    };
-    let txt = ui.visuals().strong_text_color();
-    let acc = accent(dark);
+    let c = pal(ui.visuals().dark_mode);
     let on = |b: u16| g.buttons.raw & b != 0;
-    let font = |s: f32| FontId::proportional(s * w);
-    for (x, v, l) in [(0.2, g.left_trigger, "LT"), (0.66, g.right_trigger, "RT")] {
-        let r = Rect::from_min_size(at(x, 0.0), vec2(0.14 * w, 0.065 * w));
-        p.rect_filled(r, 6.0, idle);
-        p.rect_filled(Rect::from_min_max(r.min, Pos2::new(r.min.x + r.width() * v as f32 / 255.0, r.max.y)), 6.0, acc);
-        p.text(r.center(), Align2::CENTER_CENTER, l, font(0.03), txt);
+    let von = |b: u16| out.is_some_and(|v| v.buttons.raw & b != 0);
+
+    // backdrop: faint grid + scanlines (CRT feel, cheap)
+    let area = Rect::from_min_size(o - vec2(0.0, 4.0), vec2(w, h + 4.0));
+    let mut y = area.top();
+    while y < area.bottom() {
+        p.hline(area.x_range(), y, Stroke::new(1.0, c.line.gamma_multiply(0.18)));
+        y += 3.0;
     }
-    for (x, b, l) in [(0.17, XButtons::LB, "LB"), (0.65, XButtons::RB, "RB")] {
-        let r = Rect::from_min_size(at(x, 0.08), vec2(0.18 * w, 0.05 * w));
-        p.rect_filled(r, 10.0, if on(b) { acc } else { idle });
-        p.text(r.center(), Align2::CENTER_CENTER, l, font(0.028), if on(b) { Color32::WHITE } else { txt });
+    for i in 1..12 {
+        let x = area.left() + area.width() * i as f32 / 12.0;
+        p.vline(x, area.y_range(), Stroke::new(1.0, c.line.gamma_multiply(0.12)));
     }
-    p.rect_filled(Rect::from_min_max(at(0.13, 0.14), at(0.87, 0.44)), 0.1 * w, body);
-    p.circle_filled(at(0.24, 0.42), 0.14 * w, body);
-    p.circle_filled(at(0.76, 0.42), 0.14 * w, body);
-    let stick = |c: Pos2, x: i16, y: i16, click: bool| {
-        let r = 0.06 * w;
-        p.circle_filled(c, r, idle);
-        p.circle_filled(c + vec2(x as f32, -(y as f32)) / 32767.0 * r * 0.55, r * 0.64, if click { acc } else { cap });
-    };
-    stick(at(0.28, 0.26), g.thumb_lx, g.thumb_ly, on(XButtons::LTHUMB));
-    stick(at(0.6, 0.38), g.thumb_rx, g.thumb_ry, on(XButtons::RTHUMB));
-    let d = 0.036 * w;
-    for (dx, dy, b) in [(0.0, -1.0, XButtons::UP), (0.0, 1.0, XButtons::DOWN), (-1.0, 0.0, XButtons::LEFT), (1.0, 0.0, XButtons::RIGHT)] {
-        p.rect_filled(Rect::from_center_size(at(0.4, 0.38) + vec2(dx, dy) * d, vec2(d, d)), 3.0, if on(b) { acc } else { idle });
+
+    // body silhouette: right half as cubic curves, mirrored; filled as a fan (the shape is star-shaped
+    // around its centre), outlined in neon
+    let right: [[(f32, f32); 4]; 4] = [
+        [(0.5, 0.135), (0.6, 0.135), (0.68, 0.115), (0.79, 0.115)],
+        [(0.79, 0.115), (0.9, 0.115), (0.93, 0.33), (0.92, 0.47)],
+        [(0.92, 0.47), (0.91, 0.56), (0.81, 0.58), (0.76, 0.52)],
+        [(0.76, 0.52), (0.71, 0.46), (0.6, 0.43), (0.5, 0.43)],
+    ];
+    let mut outline: Vec<Pos2> = vec![];
+    for seg in right.iter() {
+        let pts = seg.map(|(x, y)| at(x, y));
+        let b = egui::epaint::CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::NONE);
+        outline.extend(b.flatten(Some(0.4)));
     }
-    let f = 0.046 * w;
-    for (dx, dy, b, l, col) in [
-        (0.0, 1.0, XButtons::A, "A", Color32::from_rgb(52, 199, 89)),
-        (1.0, 0.0, XButtons::B, "B", Color32::from_rgb(255, 69, 58)),
-        (-1.0, 0.0, XButtons::X, "X", Color32::from_rgb(10, 132, 255)),
-        (0.0, -1.0, XButtons::Y, "Y", Color32::from_rgb(255, 204, 0)),
+    let left: Vec<Pos2> = outline.iter().rev().map(|q| Pos2::new(2.0 * at(0.5, 0.0).x - q.x, q.y)).collect();
+    outline.extend(left);
+    let centre = at(0.5, 0.3);
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(centre, c.card);
+    for (i, q) in outline.iter().enumerate() {
+        mesh.colored_vertex(*q, c.idle);
+        let n = outline.len() as u32;
+        mesh.add_triangle(0, 1 + i as u32, 1 + (i as u32 + 1) % n);
+    }
+    p.add(egui::Shape::mesh(mesh));
+    p.add(egui::Shape::closed_line(outline.clone(), Stroke::new(5.0, c.acc.gamma_multiply(0.08))));
+    p.add(egui::Shape::closed_line(outline, Stroke::new(1.5, c.acc.gamma_multiply(0.75))));
+
+    let label = |pos: Pos2, s: &str, size: f32, col: Color32| { p.text(pos, Align2::CENTER_CENTER, s, mono(size * w), col); };
+
+    // triggers: vertical meters outside the body, real (green) + virtual output (amber)
+    for (x, v, vo, name) in [(0.035, g.left_trigger, out.map(|o| o.left_trigger), "LT"), (0.965, g.right_trigger, out.map(|o| o.right_trigger), "RT")] {
+        let r = Rect::from_center_size(at(x, 0.3), vec2(0.03 * w, 0.34 * w));
+        p.rect_filled(r, 2.0, c.idle);
+        p.rect_stroke(r, 2.0, Stroke::new(1.0, c.line), StrokeKind::Inside);
+        let fill = |val: u8, rr: Rect, col: Color32| {
+            let top = rr.bottom() - rr.height() * val as f32 / 255.0;
+            p.rect_filled(Rect::from_min_max(Pos2::new(rr.left(), top), rr.max), 2.0, col);
+        };
+        fill(v, r.shrink(2.0), c.acc);
+        if v > 30 { glow(&p, r, 2.0, c.acc) }
+        if let Some(vo) = vo {
+            let side = Rect::from_min_size(Pos2::new(if x < 0.5 { r.right() + 3.0 } else { r.left() - 7.0 }, r.top()), vec2(4.0, r.height()));
+            p.rect_filled(side, 1.0, c.idle);
+            fill(vo, side, c.amber);
+        }
+        label(r.center_top() - vec2(0.0, 0.025 * w), name, 0.026, if v > 30 { c.acc } else { c.weak });
+        label(r.center_bottom() + vec2(0.0, 0.025 * w), &format!("{v:03}"), 0.024, c.text);
+    }
+
+    // bumpers
+    for (x0, b, name) in [(0.2, XButtons::LB, "LB"), (0.64, XButtons::RB, "RB")] {
+        let r = Rect::from_min_size(at(x0, 0.07), vec2(0.16 * w, 0.04 * w));
+        let lit = on(b);
+        if lit { glow(&p, r, 6.0, c.acc) }
+        p.rect_filled(r, 6.0, if lit { c.acc.gamma_multiply(0.35) } else { c.idle });
+        p.rect_stroke(r, 6.0, Stroke::new(1.2, if lit { c.acc } else if von(b) { c.amber } else { c.line }), StrokeKind::Inside);
+        label(r.center(), name, 0.024, if lit { c.acc } else { c.weak });
+    }
+
+    // sticks: well, max zone, dead zone, crosshair, trail, cap
+    for (si, (cx, cy), x, y, click, vxy) in [
+        (0usize, (0.3, 0.25), g.thumb_lx, g.thumb_ly, on(XButtons::LTHUMB), out.map(|o| (o.thumb_lx, o.thumb_ly))),
+        (1, (0.62, 0.36), g.thumb_rx, g.thumb_ry, on(XButtons::RTHUMB), out.map(|o| (o.thumb_rx, o.thumb_ry))),
     ] {
-        let c = at(0.72, 0.26) + vec2(dx, dy) * f;
-        p.circle_filled(c, 0.027 * w, if on(b) { col } else { idle });
-        p.text(c, Align2::CENTER_CENTER, l, font(0.03), if on(b) { Color32::WHITE } else { txt });
+        let ctr = at(cx, cy);
+        let r = 0.075 * w;
+        let s = &sticks[si];
+        p.circle_filled(ctr, r, c.card);
+        p.circle_stroke(ctr, r, Stroke::new(1.0, c.line));
+        p.circle_stroke(ctr, r * (s.max as f32 / 32767.0).min(1.0), Stroke::new(1.0, c.weak.gamma_multiply(0.5)));
+        p.circle_filled(ctr, r * s.dead as f32 / 32767.0, c.line.gamma_multiply(0.5));
+        p.hline((ctr.x - r)..=(ctr.x + r), ctr.y, Stroke::new(1.0, c.line.gamma_multiply(0.6)));
+        p.vline(ctr.x, (ctr.y - r)..=(ctr.y + r), Stroke::new(1.0, c.line.gamma_multiply(0.6)));
+        let n = (x as f32 / 32767.0, y as f32 / 32767.0);
+        let t = &mut trail[si];
+        if t.front() != Some(&n) { t.push_front(n) }
+        t.truncate(18);
+        let pos = |q: &(f32, f32)| ctr + vec2(q.0, -q.1) * r;
+        for (i, win) in t.iter().collect::<Vec<_>>().windows(2).enumerate() {
+            let a = 1.0 - i as f32 / 18.0;
+            p.line_segment([pos(win[0]), pos(win[1])], Stroke::new(2.0 * a, c.acc.gamma_multiply(0.5 * a)));
+        }
+        if let Some((vx, vy)) = vxy.filter(|v| *v != (0, 0)) {
+            p.circle_stroke(pos(&(vx as f32 / 32767.0, vy as f32 / 32767.0)), r * 0.2, Stroke::new(1.5, c.amber));
+        }
+        let live = eval_stick(s, x as i32, y as i32).safe;
+        let cap = pos(&n);
+        if live || click { glow_circle(&p, cap, r * 0.22, c.acc) }
+        p.circle_filled(cap, r * 0.22, if click { c.acc } else if live { c.acc.gamma_multiply(0.55) } else { c.weak.gamma_multiply(0.6) });
+        p.circle_stroke(cap, r * 0.22, Stroke::new(1.2, c.acc));
     }
-    for (x, y, r, b) in [(0.44, 0.26, 0.017, XButtons::BACK), (0.56, 0.26, 0.017, XButtons::START), (0.5, 0.19, 0.028, XButtons::GUIDE)] {
-        p.circle_filled(at(x, y), r * w, if on(b) { acc } else { idle });
+
+    // d-pad
+    let dp = at(0.4, 0.37);
+    let a = 0.028 * w;
+    for (dx, dy, b) in [(0.0, -1.0, XButtons::UP), (0.0, 1.0, XButtons::DOWN), (-1.0, 0.0, XButtons::LEFT), (1.0, 0.0, XButtons::RIGHT)] {
+        let r = Rect::from_center_size(dp + vec2(dx, dy) * a, vec2(a, a));
+        let lit = on(b);
+        if lit { glow(&p, r, 2.0, c.acc) }
+        p.rect_filled(r, 2.0, if lit { c.acc } else { c.card });
+        p.rect_stroke(r, 2.0, Stroke::new(1.0, if von(b) { c.amber } else { c.line }), StrokeKind::Inside);
     }
+    p.rect_filled(Rect::from_center_size(dp, vec2(a, a)), 0.0, c.card);
+
+    // face buttons
+    let f = 0.042 * w;
+    for (dx, dy, b, l, col) in [
+        (0.0, 1.0, XButtons::A, "A", Color32::from_rgb(70, 220, 120)),
+        (1.0, 0.0, XButtons::B, "B", Color32::from_rgb(255, 90, 80)),
+        (-1.0, 0.0, XButtons::X, "X", Color32::from_rgb(70, 150, 255)),
+        (0.0, -1.0, XButtons::Y, "Y", Color32::from_rgb(255, 210, 60)),
+    ] {
+        let ctr = at(0.71, 0.24) + vec2(dx, dy) * f;
+        let r = 0.022 * w;
+        let lit = on(b);
+        if lit { glow_circle(&p, ctr, r, col) }
+        p.circle_filled(ctr, r, if lit { col } else { c.card });
+        p.circle_stroke(ctr, r, Stroke::new(1.5, if von(b) { c.amber } else { col.gamma_multiply(0.8) }));
+        label(ctr, l, 0.024, if lit { Color32::BLACK } else { col });
+    }
+
+    // back / start / guide
+    for (x, y, r, b) in [(0.445, 0.24, 0.013, XButtons::BACK), (0.555, 0.24, 0.013, XButtons::START), (0.5, 0.18, 0.022, XButtons::GUIDE)] {
+        let ctr = at(x, y);
+        let lit = on(b);
+        if lit { glow_circle(&p, ctr, r * w, c.acc) }
+        p.circle_filled(ctr, r * w, if lit { c.acc } else { c.card });
+        p.circle_stroke(ctr, r * w, Stroke::new(1.0, if von(b) { c.amber } else { c.line }));
+    }
+
+    // readout strip
+    let stick_txt = |x: i16, y: i16| format!("{:+.2} {:+.2}", x as f32 / 32767.0, y as f32 / 32767.0);
+    let line = format!("LS {}   RS {}   LT {:03}  RT {:03}", stick_txt(g.thumb_lx, g.thumb_ly), stick_txt(g.thumb_rx, g.thumb_ry), g.left_trigger, g.right_trigger);
+    p.text(Pos2::new(resp.rect.center().x, resp.rect.bottom() - 12.0), Align2::CENTER_CENTER, line, mono(12.0), c.weak);
+    if out.is_some() {
+        p.text(o + vec2(w, 2.0), Align2::RIGHT_TOP, "■ virtuell", mono(11.0), c.amber);
+    }
+    p.text(o + vec2(0.0, 2.0), Align2::LEFT_TOP, "■ echt", mono(11.0), c.acc); // legend in the top corners, clear of the readout
 }
 
 /// JoyControlStickStatusBox: zones, diagonal sectors and the live position.
@@ -457,6 +751,7 @@ pub struct App {
     auto_last: String,
     toast: Option<(String, Instant)>,
     show_live: bool,
+    trail: Trail,
     vigem_msg: Arc<std::sync::Mutex<Option<String>>>, // Some while installing, then the result
 }
 
@@ -471,7 +766,7 @@ impl App {
         let mut app = App {
             p_sent, st_sent, saved: p.clone(), p, s, st, path,
             profiles: vec![], tab: Tab::Controller, dlgs: vec![], cap: None, pick_tab: 0, adv_page: 0, adv_sel: 0, set_page: 0,
-            epp_prev, auto_t: Instant::now(), auto_last: String::new(), toast: None, show_live: true,
+            epp_prev, auto_t: Instant::now(), auto_last: String::new(), toast: None, show_live: true, trail: Default::default(),
             vigem_msg: Arc::default(),
         };
         app.scan_profiles();
@@ -578,12 +873,21 @@ impl App {
 
     fn header(&mut self, ui: &mut egui::Ui) {
         let on = self.s.on.load(Relaxed);
+        // own title bar (the window has no Windows frame): empty space drags, double click maximizes.
+        // Registered before the widgets, so buttons on top still get their clicks.
+        let row = Rect::from_min_size(ui.cursor().min - vec2(14.0, 10.0), vec2(ui.available_width() + 28.0, 44.0));
+        let bar = ui.interact(row, ui.id().with("titlebar"), Sense::click_and_drag());
+        let maxed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+        if bar.double_clicked() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maxed));
+        } else if bar.drag_started_by(egui::PointerButton::Primary) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
         ui.horizontal(|ui| {
-            ui.label(RichText::new("padmimic").size(20.0).strong());
-            ui.menu_button("App", |ui| {
-                if ui.button("Minimieren").clicked() { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true)) }
-                if ui.button("Beenden").clicked() { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close) }
-            });
+            let c = pal(ui.visuals().dark_mode);
+            // blinking block cursor after the name, like an old terminal prompt
+            let blink = (ui.input(|i| i.time) * 1.6) as i64 % 2 == 0;
+            ui.label(RichText::new(format!("PADMIMIC{}", if blink { "█" } else { " " })).font(mono(20.0)).color(c.acc));
             ui.menu_button("Optionen", |ui| {
                 if ui.button("Einstellungen…").clicked() { self.open(Dlg::Settings); ui.close() }
                 if ui.button("Latenz-Messung…").clicked() { self.open(Dlg::Latency); ui.close() }
@@ -592,8 +896,12 @@ impl App {
                 if ui.button("Über padmimic").clicked() { self.open(Dlg::About); ui.close() }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let ctx = ui.ctx().clone();
+                if win_btn(ui, WinBtn::Close) { ctx.send_viewport_cmd(egui::ViewportCommand::Close) }
+                if win_btn(ui, if maxed { WinBtn::Restore } else { WinBtn::Max }) { ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maxed)) }
+                if win_btn(ui, WinBtn::Min) { ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)) }
+                ui.add_space(10.0);
                 if switch(ui, on) { self.s.on.store(!on, Relaxed) }
-                ui.label(if on { "Aktiv" } else { "Aus" });
             });
         });
     }
@@ -678,9 +986,11 @@ impl App {
     }
 
     fn controller_tab(&mut self, ui: &mut egui::Ui, active: &[Elem]) {
-        let live_phys = self.s.live.lock().unwrap().phys;
+        let (phys, out, vigem, hz) = { let l = self.s.live.lock().unwrap(); (l.phys, l.out, l.vigem, l.stats.pad_hz) };
         if self.show_live {
-            card(ui, "", |ui| controller(ui, &live_phys));
+            let sticks = self.p.sets[self.cur()].sticks.clone();
+            let trail = &mut self.trail;
+            card(ui, &format!("Live · {hz} Upd/s"), |ui| controller(ui, &phys, vigem.then_some(&out), &sticks, trail));
         }
         let full = ui.available_width();
         let cols = if full > 700.0 { 3 } else if full > 460.0 { 2 } else { 1 };
@@ -781,10 +1091,10 @@ impl App {
                 ui.selectable_value(&mut aim.stick, VStick::Right, "Rechter Stick");
                 ui.selectable_value(&mut aim.stick, VStick::Left, "Linker Stick");
             });
-            ui.add(egui::Slider::new(&mut aim.sens, 0.05..=5.0).text("Sensitivität"));
-            ui.add(egui::Slider::new(&mut aim.smooth, 0.0..=0.95).text("Glättung"));
-            ui.add(egui::Slider::new(&mut aim.deadzone, 0.0..=0.5).text("Anti-Deadzone"));
-            ui.add(egui::Slider::new(&mut aim.window_ms, 0.125..=8.0).logarithmic(true).suffix(" ms").text("Mess-Fenster"))
+            rg("Sensitivität").show(ui, &mut aim.sens, 0.05..=5.0);
+            rg("Glättung").show(ui, &mut aim.smooth, 0.0..=0.95);
+            rg("Anti-Deadzone").show(ui, &mut aim.deadzone, 0.0..=0.5);
+            rg("Mess-Fenster").log().suffix(" ms").show(ui, &mut aim.window_ms, 0.125..=8.0)
                 .on_hover_text("Zeitraum, über den die Mausbewegung gemittelt wird. ≈ 1000 ÷ Maus-Abfragerate: 1 ms bei 1000 Hz, 2 ms bei 500 Hz, 0,25 ms bei 4000 Hz. Kleiner = direkter, zu klein = zittrig.");
         });
     }
@@ -831,11 +1141,11 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.small(status);
-            ui.small(format!(
-                "· Controller: {} · {} Upd/s · Engine {} Hz · Virtuell: {}",
-                st.slot.map_or("nicht gefunden".into(), |i| format!("Slot {}", i + 1)), st.pad_hz, st.loop_hz,
-                st.virt_slot.map_or("–".into(), |i| format!("Slot {}", i + 1))
-            ));
+            ui.label(RichText::new(format!(
+                "PAD {} · {} UPD/S · ENGINE {} HZ · VIRT {}",
+                st.slot.map_or("–".into(), |i| format!("#{}", i + 1)), st.pad_hz, st.loop_hz,
+                st.virt_slot.map_or("–".into(), |i| format!("#{}", i + 1))
+            )).font(mono(11.0)).color(pal(ui.visuals().dark_mode).weak));
             if let Some((t, at)) = &self.toast {
                 if at.elapsed() < Duration::from_secs(3) { ui.small(RichText::new(t).color(accent(ui.visuals().dark_mode))); }
             }
@@ -1011,15 +1321,13 @@ impl App {
                             Slot::Delay(ms) => { ms_field(ui, "Zeit:", ms, 600_000); }
                             Slot::Release(ms) => { ms_field(ui, "Zeit:", ms, 600_000); }
                             Slot::PressTime(ms) => { ms_field(ui, "Zeit:", ms, 600_000); }
-                            Slot::Distance(p) => { ui.add(egui::Slider::new(p, 1..=100).suffix(" %").text("Distanz")); }
-                            Slot::MouseMod(p) => { ui.add(egui::Slider::new(p, 1..=400).suffix(" %").text("Maus-Tempo")); }
+                            Slot::Distance(p) => { rg("Distanz").suffix(" %").show(ui, p, 1..=100); }
+                            Slot::MouseMod(p) => { rg("Maus-Tempo").suffix(" %").show(ui, p, 1..=400); }
                             Slot::Cycle => {
                                 let mut on = b.cycle_reset.is_some();
                                 let mut v = b.cycle_reset.unwrap_or(1000) as f32 / 1000.0;
-                                ui.horizontal(|ui| {
-                                    ui.checkbox(&mut on, "Zyklus automatisch zurücksetzen nach");
-                                    ui.add_enabled(on, egui::DragValue::new(&mut v).range(0.01..=60.0).speed(0.05).suffix(" s"));
-                                });
+                                ui.checkbox(&mut on, "Zyklus automatisch zurücksetzen");
+                                ui.add_enabled_ui(on, |ui| rg("Zurücksetzen nach").suffix(" s").log().show(ui, &mut v, 0.01..=60.0));
                                 b.cycle_reset = on.then_some((v * 1000.0) as u32);
                             }
                             Slot::SetChange(n) => {
@@ -1157,12 +1465,12 @@ impl App {
             });
             ui.vertical(|ui| {
                 Self::dir_mode_combo(ui, "stickmode", &mut s.mode);
-                ui.add(egui::Slider::new(&mut s.dead, 1..=32737).text("Tote Zone"));
-                ui.add(egui::Slider::new(&mut s.max, 1..=32737).text("Max. Zone"));
-                ui.add_enabled(matches!(s.mode, DirMode::Standard | DirMode::EightWay), egui::Slider::new(&mut s.diag, 1..=90).suffix("°").text("Diagonal-Bereich"));
-                ui.add(egui::Slider::new(&mut s.square, 0..=100).suffix(" %").text("Square Stick"));
-                ui.add(egui::Slider::new(&mut s.delay, 0..=1000).step_by(10.0).suffix(" ms").text("Stick-Verzögerung"));
-                ui.add(egui::Slider::new(&mut s.mod_zone, 1..=32737).text("Modifier-Zone"));
+                rg("Tote Zone").show(ui, &mut s.dead, 1..=32737);
+                rg("Max. Zone").show(ui, &mut s.max, 1..=32737);
+                ui.add_enabled_ui(matches!(s.mode, DirMode::Standard | DirMode::EightWay), |ui| rg("Diagonal-Bereich").suffix("°").show(ui, &mut s.diag, 1..=90));
+                rg("Square Stick").suffix(" %").show(ui, &mut s.square, 0..=100);
+                rg("Stick-Verzögerung").suffix(" ms").show(ui, &mut s.delay, 0..=1000);
+                rg("Modifier-Zone").show(ui, &mut s.mod_zone, 1..=32737);
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut s.mod_inv, "Modifier-Zone invertieren");
                     open_mod = ui.button(format!("Modifier: {}", summary(&s.modifier))).clicked();
@@ -1196,7 +1504,7 @@ impl App {
         let mut m = d.mode.unwrap_or(DirMode::Standard);
         Self::dir_mode_combo(ui, "dpadmode", &mut m);
         d.mode = (m != DirMode::Standard).then_some(m);
-        ui.add(egui::Slider::new(&mut d.delay, 0..=1000).step_by(10.0).suffix(" ms").text("D-Pad-Verzögerung"));
+        rg("D-Pad-Verzögerung").suffix(" ms").show(ui, &mut d.delay, 0..=1000);
         ui.horizontal(|ui| { ui.label("Name:"); ui.text_edit_singleline(&mut d.name); });
         let done = ui.horizontal(|ui| {
             open_mouse = ui.button("Maus-Einstellungen…").clicked();
@@ -1229,8 +1537,8 @@ impl App {
         egui::ComboBox::from_label("Throttle").selected_text(names[(a.throttle + 2) as usize]).show_ui(ui, |ui| {
             for (i, n) in names.iter().enumerate() { ui.selectable_value(&mut a.throttle, i as i8 - 2, *n); }
         });
-        ui.add(egui::Slider::new(&mut a.dead, 0..=32737).text("Tote Zone"));
-        ui.add(egui::Slider::new(&mut a.max, 1..=32737).text("Max. Zone"));
+        rg("Tote Zone").show(ui, &mut a.dead, 0..=32737);
+        rg("Max. Zone").show(ui, &mut a.max, 1..=32737);
         let v = engine::throttle(raw as i32 * 32767 / 255, a.throttle);
         ui.horizontal(|ui| {
             ui.label("Aktueller Wert:");
@@ -1289,22 +1597,22 @@ impl App {
             ui.checkbox(&mut together, "Gemeinsam ändern");
             let ox = m.speed_x;
             let (lx, ly) = (format!("Horizontal ({} px/s)", m.speed_x as u32 * 20), format!("Vertikal ({} px/s)", m.speed_y as u32 * 20));
-            ui.add(egui::Slider::new(&mut m.speed_x, 1..=300).text(lx));
-            ui.add(egui::Slider::new(&mut m.speed_y, 1..=300).text(ly));
+            rg(&lx).show(ui, &mut m.speed_x, 1..=300);
+            rg(&ly).show(ui, &mut m.speed_y, 1..=300);
             if together { if m.speed_x != ox { m.speed_y = m.speed_x } else { m.speed_x = m.speed_y } }
-            ui.add(egui::Slider::new(&mut m.wheel_x, 1..=100).text("Rad horizontal (Rasten/s)"));
-            ui.add(egui::Slider::new(&mut m.wheel_y, 1..=100).text("Rad vertikal (Rasten/s)"));
-            ui.add_enabled(m.curve == Curve::Power, egui::Slider::new(&mut m.sens, 0.001..=1000.0).logarithmic(true).text("Sensitivität"));
-            ui.add_enabled(matches!(m.curve, Curve::EasingQuadratic | Curve::EasingCubic), egui::Slider::new(&mut m.easing, 0.2..=5.0).suffix(" s").text("Easing-Dauer"));
+            rg("Rad horizontal").suffix(" Rasten/s").show(ui, &mut m.wheel_x, 1..=100);
+            rg("Rad vertikal").suffix(" Rasten/s").show(ui, &mut m.wheel_y, 1..=100);
+            ui.add_enabled_ui(m.curve == Curve::Power, |ui| rg("Sensitivität").log().show(ui, &mut m.sens, 0.001..=1000.0));
+            ui.add_enabled_ui(matches!(m.curve, Curve::EasingQuadratic | Curve::EasingCubic), |ui| rg("Easing-Dauer").suffix(" s").show(ui, &mut m.easing, 0.2..=5.0));
         });
         card(ui, "", |ui| {
             ui.checkbox(&mut m.accel, RichText::new("Delta-Beschleunigung").strong());
             ui.add_enabled_ui(m.accel, |ui| {
-                ui.add(egui::Slider::new(&mut m.accel_mult, 1.0..=200.0).suffix("×").text("Multiplikator"));
-                ui.add(egui::Slider::new(&mut m.accel_start, 0.0..=100.0).suffix(" %").text("Start"));
-                ui.add(egui::Slider::new(&mut m.accel_min, 0.0..=100.0).suffix(" %").text("Min. Schwelle"));
-                ui.add(egui::Slider::new(&mut m.accel_max, 0.0..=100.0).suffix(" %").text("Max. Schwelle"));
-                ui.add(egui::Slider::new(&mut m.accel_dur, 0.0..=5.0).suffix(" s").text("Extra-Dauer"));
+                rg("Multiplikator").suffix("×").show(ui, &mut m.accel_mult, 1.0..=200.0);
+                rg("Start").suffix(" %").show(ui, &mut m.accel_start, 0.0..=100.0);
+                rg("Min. Schwelle").suffix(" %").show(ui, &mut m.accel_min, 0.0..=100.0);
+                rg("Max. Schwelle").suffix(" %").show(ui, &mut m.accel_max, 0.0..=100.0);
+                rg("Extra-Dauer").suffix(" s").show(ui, &mut m.accel_dur, 0.0..=5.0);
                 ui.horizontal(|ui| {
                     ui.label("Kurve:");
                     for (c, l) in [(AccelCurve::Linear, "Linear"), (AccelCurve::EaseOutSine, "Sinus"), (AccelCurve::EaseOutQuad, "Quad"), (AccelCurve::EaseOutCubic, "Kubisch")] {
@@ -1315,14 +1623,10 @@ impl App {
         });
         card(ui, "Spring", |ui| {
             ui.add_enabled_ui(m.mode == MouseMode::Spring, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Breite");
-                    ui.add(egui::DragValue::new(&mut m.spring_w).range(0..=16384));
-                    ui.label("Höhe");
-                    ui.add(egui::DragValue::new(&mut m.spring_h).range(0..=16384));
-                    ui.weak("0 = Bildschirm");
-                });
-                ui.add(egui::Slider::new(&mut m.spring_release, 0..=100).suffix(" %").text("Release-Radius"));
+                rg("Breite").suffix(" px").show(ui, &mut m.spring_w, 0..=16384);
+                rg("Höhe").suffix(" px").show(ui, &mut m.spring_h, 0..=16384);
+                ui.weak("Breite/Höhe 0 = ganzer Bildschirm");
+                rg("Release-Radius").suffix(" %").show(ui, &mut m.spring_release, 0..=100);
                 ui.checkbox(&mut m.spring_rel, "Relativ");
             });
         });
@@ -1380,7 +1684,7 @@ impl App {
             ui.vertical(|ui| match page {
                 0 => {
                     ui.horizontal(|ui| { ui.label("Profil-Ordner:"); ui.text_edit_singleline(&mut st.profile_dir); });
-                    ui.add(egui::Slider::new(&mut st.recent_count, 1..=100).text("Letzte Profile"));
+                    rg("Letzte Profile").show(ui, &mut st.recent_count, 1..=100);
                     ui.checkbox(&mut st.auto_load_last, "Zuletzt geöffnetes Profil automatisch laden");
                     ui.checkbox(&mut st.startup, "Mit Windows starten");
                     ui.checkbox(&mut st.hide_empty, "Leere Buttons ausblenden");
@@ -1392,8 +1696,8 @@ impl App {
                     });
                     card(ui, "Tastenwiederholung", |ui| {
                         ui.checkbox(&mut st.key_repeat, "Aktiv");
-                        ui.add_enabled(st.key_repeat, egui::Slider::new(&mut st.key_repeat_delay, 0..=1000).suffix(" ms").text("Verzögerung"));
-                        ui.add_enabled(st.key_repeat, egui::Slider::new(&mut st.key_repeat_rate, 5..=250).suffix("/s").text("Rate"));
+                        ui.add_enabled_ui(st.key_repeat, |ui| rg("Verzögerung").suffix(" ms").show(ui, &mut st.key_repeat_delay, 0..=1000));
+                        ui.add_enabled_ui(st.key_repeat, |ui| rg("Rate").suffix("/s").show(ui, &mut st.key_repeat_rate, 5..=250));
                     });
                 }
                 1 => {
@@ -1422,8 +1726,8 @@ impl App {
                     ui.checkbox(&mut st.disable_epp, "Windows „Zeigerbeschleunigung verbessern“ deaktivieren");
                     card(ui, "Glättung", |ui| {
                         ui.checkbox(&mut st.smoothing, "Aktiv");
-                        ui.add_enabled(st.smoothing, egui::Slider::new(&mut st.history, 1..=100).text("Verlaufsgröße"));
-                        ui.add_enabled(st.smoothing, egui::Slider::new(&mut st.weight, 0.0..=1.0).text("Gewichtung"));
+                        ui.add_enabled_ui(st.smoothing, |ui| rg("Verlaufsgröße").show(ui, &mut st.history, 1..=100));
+                        ui.add_enabled_ui(st.smoothing, |ui| rg("Gewichtung").show(ui, &mut st.weight, 0.0..=1.0));
                     });
                     ui.horizontal(|ui| {
                         ui.label("Maus-Refresh:");
@@ -1597,6 +1901,7 @@ impl eframe::App for App {
         let focused = ui.ctx().input(|i| i.viewport().focused.unwrap_or(true));
         let ms = if self.cap.is_some() || !self.dlgs.is_empty() { 16 } else if on || self.show_live { if focused { 16 } else { 100 } } else { 250 };
         ui.ctx().request_repaint_after(Duration::from_millis(ms));
+        window_edges(ui.ctx());
         let active = self.s.live.lock().unwrap().active.clone();
 
         let bar = egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 10));
