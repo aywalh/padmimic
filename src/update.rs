@@ -80,7 +80,9 @@ pub fn install(r: &Release) -> Result<(), String> {
         "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol='Tls12'
 $f = '{new}'
 try {{ Invoke-WebRequest -UseBasicParsing -Headers @{{'User-Agent'='padmimic-updater'}} '{exe_url}' -OutFile $f
-       $want = ((Invoke-WebRequest -UseBasicParsing -Headers @{{'User-Agent'='padmimic-updater'}} '{sha_url}').Content -split '\\s+')[0] }} catch {{ exit 10 }}
+       # as a file: GitHub serves it as binary, .Content would be bytes, not text
+       Invoke-WebRequest -UseBasicParsing -Headers @{{'User-Agent'='padmimic-updater'}} '{sha_url}' -OutFile \"$f.sha256\"
+       $want = ((Get-Content \"$f.sha256\" -Raw).Trim() -split '\\s+')[0]; Remove-Item \"$f.sha256\" }} catch {{ exit 10 }}
 if ((Get-FileHash $f -Algorithm SHA256).Hash -ne $want.ToUpper()) {{ Remove-Item $f; exit 11 }}",
         new = new.display().to_string().replace('\'', "''"),
         exe_url = r.exe_url,
@@ -103,10 +105,15 @@ if ((Get-FileHash $f -Algorithm SHA256).Hash -ne $want.ToUpper()) {{ Remove-Item
 
 /// Remove what an earlier update left behind (the old exe can't be deleted while it runs).
 pub fn cleanup() {
-    if let Ok((new, old, _)) = exe_paths() {
-        let _ = std::fs::remove_file(old);
-        let _ = std::fs::remove_file(new);
-    }
+    let Ok((new, old, _)) = exe_paths() else { return };
+    let _ = std::fs::remove_file(new);
+    // right after an update the old instance is still closing: retry for a few seconds
+    std::thread::spawn(move || {
+        for _ in 0..15 {
+            if !old.exists() || std::fs::remove_file(&old).is_ok() { return }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    });
 }
 
 #[cfg(test)]

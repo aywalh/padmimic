@@ -866,6 +866,11 @@ impl App {
         *u.lock().unwrap() = Upd::Checking;
         std::thread::spawn(move || {
             let r = match update::check() {
+                // dev hook for testing the whole update path without clicking
+                Ok(Some(r)) if std::env::var_os("PADMIMIC_AUTOUPDATE").is_some() => match update::install(&r) {
+                    Ok(()) => Upd::Restarting,
+                    Err(e) => Upd::Failed(e),
+                },
                 Ok(Some(r)) => Upd::Available(r),
                 Ok(None) => Upd::Latest,
                 Err(e) => Upd::Failed(e),
