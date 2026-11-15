@@ -291,6 +291,21 @@ fn act_picker(ui: &mut egui::Ui, tab: &mut u8, sel: Option<Act>, numpad: bool) -
     hit
 }
 
+/// Seconds slider for a ms value: drag the bar, or the number box (hover, hold, slide left/right),
+/// or click the number and type it ("0,02" and "0.02" both work).
+fn secs_slider(ui: &mut egui::Ui, ms: &mut u32, min_ms: u32, max_ms: u32, text: String) {
+    let mut s = *ms as f64 / 1000.0;
+    ui.add(
+        egui::Slider::new(&mut s, min_ms as f64 / 1000.0..=max_ms as f64 / 1000.0)
+            .logarithmic(true)
+            .suffix(" s")
+            .custom_formatter(|v, _| format!("{v:.3}").replace('.', ","))
+            .custom_parser(|t| t.trim().trim_end_matches('s').trim().replace(',', ".").parse().ok())
+            .text(text),
+    );
+    *ms = ((s * 1000.0).round() as u32).clamp(min_ms, max_ms);
+}
+
 fn ms_field(ui: &mut egui::Ui, label: &str, v: &mut u32, max: u32) -> bool {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -623,8 +638,23 @@ impl App {
             ui.allocate_exact_size(size, Sense::hover());
             return;
         }
-        if cell(ui, title, &summary(b), active.contains(&e), size).on_hover_text(elem_name(set, e)).clicked() {
+        let used = *b != Button::default();
+        let hint = if used { format!("{}\nRechtsklick: Belegung entfernen", elem_name(set, e)) } else { elem_name(set, e) };
+        let r = cell(ui, title, &summary(b), active.contains(&e), size).on_hover_text(hint);
+        if r.clicked() {
             self.open(Dlg::Button(e));
+        }
+        let mut clear = false;
+        if used {
+            r.context_menu(|ui| {
+                if ui.button("🗑 Belegung entfernen").clicked() {
+                    clear = true;
+                    ui.close();
+                }
+            });
+        }
+        if clear {
+            if let Some(b) = self.set().button_mut(e) { *b = Button::default() }
         }
     }
 
@@ -894,7 +924,8 @@ impl App {
         let mut cap = false;
         ui.horizontal(|ui| {
             cap = ui.button(if capturing { "Drücken…" } else { "⏺ Aufnehmen" }).clicked();
-            if ui.button("Leeren").clicked() { b.slots.clear() }
+            // everything off: outputs, turbo, toggle, set change, name
+            if ui.button("🗑 Entfernen").on_hover_text("Ganze Belegung entfernen").clicked() { *b = Button::default() }
             ui.checkbox(&mut b.toggle, "Toggle");
             ui.checkbox(&mut b.turbo, "Turbo");
         });
@@ -1028,10 +1059,10 @@ impl App {
                         ui.selectable_value(&mut m, TurboMode::Pulse, "Puls");
                     });
                     b.turbo_mode = (m != TurboMode::Normal).then_some(m);
-                    let mut tens = b.turbo_interval() / 10;
-                    let l = format!("Verzögerung {}  ·  Rate {:.1}/s", secs(tens * 10), 100.0 / tens as f32);
-                    ui.add(egui::Slider::new(&mut tens, 1..=400).show_value(false).text(l));
-                    b.turbo_ms = tens * 10;
+                    let mut ms = b.turbo_interval();
+                    let l = format!("Verzögerung  ·  Rate {:.1}/s", 1000.0 / ms as f32);
+                    secs_slider(ui, &mut ms, 2, 4000, l);
+                    if ms != b.turbo_interval() { b.turbo_ms = ms } // just looking keeps 0 = default
                     ui.weak("Gradient: Druckdauer folgt dem Achsenweg. Puls: Frequenz folgt dem Achsenweg.");
                 }
                 _ => {
@@ -1316,10 +1347,7 @@ impl App {
     }
 
     fn dlg_pref(&mut self, ui: &mut egui::Ui) -> bool {
-        let mut tens = (self.p.key_press_ms / 10).clamp(1, 100);
-        let l = format!("Tasten-Druckzeit {} ms", tens * 10);
-        ui.add(egui::Slider::new(&mut tens, 1..=100).show_value(false).text(l));
-        self.p.key_press_ms = tens * 10;
+        secs_slider(ui, &mut self.p.key_press_ms, 1, 1000, "Tasten-Druckzeit".into());
         ui.horizontal(|ui| { ui.label("Profilname:"); ui.text_edit_singleline(&mut self.p.name); });
         Self::ok_row(ui)
     }
@@ -1565,8 +1593,10 @@ impl eframe::App for App {
         self.capture();
         self.background();
         let on = self.s.on.load(Relaxed);
-        let busy = on || self.cap.is_some() || !self.dlgs.is_empty() || self.show_live;
-        ui.ctx().request_repaint_after(Duration::from_millis(if busy { 16 } else { 250 }));
+        // while the game has focus nobody watches this window at 60 fps: its CPU/GPU time belongs to the game
+        let focused = ui.ctx().input(|i| i.viewport().focused.unwrap_or(true));
+        let ms = if self.cap.is_some() || !self.dlgs.is_empty() { 16 } else if on || self.show_live { if focused { 16 } else { 100 } } else { 250 };
+        ui.ctx().request_repaint_after(Duration::from_millis(ms));
         let active = self.s.live.lock().unwrap().active.clone();
 
         let bar = egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 10));

@@ -4,7 +4,7 @@
 use crate::model::*;
 use crate::winio;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU8, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{mem, ptr, thread};
@@ -650,7 +650,55 @@ static DY: AtomicI32 = AtomicI32::new(0);
 
 pub fn spawn(s: Arc<Shared>) {
     thread::spawn(raw_mouse_thread);
+    thread::spawn(slot_scan_thread);
     thread::spawn(move || run(s));
+}
+
+const NONE: u8 = 255;
+/// XInput slot of the controller in use, picked by `slot_scan_thread`.
+static SLOT_HINT: AtomicU8 = AtomicU8::new(NONE);
+/// Our virtual pad's slot, never a candidate for the real controller.
+static VIRT: AtomicU8 = AtomicU8::new(NONE);
+/// Virtual pad just plugged in: the next slot that appears is ours.
+static LOOKING: AtomicBool = AtomicBool::new(false);
+/// What our virtual pad shows right now; None = not plugged in.
+static OUT: Mutex<Option<XGamepad>> = Mutex::new(None);
+
+/// Follows the controller that is actually used: an idle or phantom pad in a lower slot (or our own
+/// virtual pad, if it couldn't be identified) must never hide the one in your hands. Own thread,
+/// because querying empty XInput slots is slow and would stall the engine.
+fn slot_scan_thread() {
+    let mut seen = [None::<u32>; 4];
+    let mut active = [None::<Instant>; 4];
+    let (mut look_t, mut scanned): (Option<Instant>, bool) = (None, false);
+    loop {
+        // XInput can take seconds to list a new pad; a real one plugged in at the same moment is unlikely
+        if !LOOKING.load(Relaxed) {
+            look_t = None;
+        } else if look_t.get_or_insert_with(Instant::now).elapsed() > Duration::from_secs(15) {
+            LOOKING.store(false, Relaxed);
+        }
+        let (virt, out) = (VIRT.load(Relaxed), *OUT.lock().unwrap());
+        let mut best: Option<(u32, Option<Instant>)> = None;
+        for i in 0..4u32 {
+            let k = i as usize;
+            let Some((pkt, g)) = (i as u8 != virt).then(|| read_xinput(i)).flatten() else {
+                (seen[k], active[k]) = (None, None);
+                continue;
+            };
+            if seen[k].is_none() && look_t.is_some() && scanned && LOOKING.swap(false, Relaxed) {
+                VIRT.store(i as u8, Relaxed); // appeared after our plug-in: ours
+                continue;
+            }
+            let ours = out == Some(g); // shows exactly our output: our own pad, unidentified
+            if !ours && seen[k].is_some_and(|p| p != pkt) { active[k] = Some(Instant::now()) }
+            seen[k] = Some(pkt);
+            if !ours && best.is_none_or(|b| active[k] > b.1) { best = Some((i, active[k])) }
+        }
+        SLOT_HINT.store(best.map_or(NONE, |b| b.0 as u8), Relaxed);
+        scanned = true; // from now on a slot without a previous reading is a newly plugged one
+        thread::sleep(Duration::from_millis(200));
+    }
 }
 
 fn read_xinput(slot: u32) -> Option<(u32, XGamepad)> {
@@ -781,6 +829,9 @@ impl Engine {
             }
         }
         for (b, v) in winio::BLOCK.iter().zip(block) { b.store(v, Relaxed) }
+        // system-wide hooks delay every key/mouse event on the PC: only while something is blocked,
+        // raw mouse only while mouse aim runs (AntiMicro has neither, so idle padmimic must have neither)
+        set_inputs(block.contains(&true), on && p.mouse_aim.enabled);
         let mut fx = Frame::default();
         let samples = self.sample(set, phys, now, &mut fx.pad);
 
@@ -930,35 +981,21 @@ impl Engine {
     }
 }
 
-/// Find our virtual pad among the XInput slots by sending a state no real pad rests at, then neutral
-/// again. The probe sits inside every dead zone, so a game reading it sees nothing. ViGEm's own
-/// user-index answer is only the fallback: if it is wrong, the engine reads its own idle pad.
-fn find_virtual_slot(p: &mut Xbox360Wired<Client>) -> Option<u32> {
-    let probe = XGamepad { thumb_lx: 7, thumb_ly: -3, thumb_rx: 5, thumb_ry: -9, ..Default::default() };
-    p.update(&probe).ok()?;
-    let found = (0..50).find_map(|_| {
-        let hit = (0..4).find(|&i| read_xinput(i).is_some_and(|(_, g)| g == probe));
-        if hit.is_none() { thread::sleep(Duration::from_millis(10)) }
-        hit
-    });
-    let _ = p.update(&XGamepad::default());
-    found
-}
-
-/// Plug in the virtual pad; also returns its XInput slot and reports the result to the UI.
-fn connect_pad(s: &Shared, mirrors: bool) -> (Option<Xbox360Wired<Client>>, Option<u32>) {
+/// Plug in the virtual pad and report the result to the UI. Its XInput slot is found by
+/// `slot_scan_thread` (the slot that appears right after this). ViGEm's user index can't be used:
+/// it counts only wired-style pads, so with a Bluetooth controller it named the real one.
+fn connect_pad(s: &Shared, mirrors: bool) -> Option<Xbox360Wired<Client>> {
+    VIRT.store(NONE, Relaxed);
+    LOOKING.store(true, Relaxed);
     let pad = Client::connect().and_then(|c| {
         let mut t = Xbox360Wired::new(c, TargetId::XBOX360_WIRED);
         t.plugin()?;
         t.wait_ready()?;
         Ok(t)
     });
-    let mut l = s.live.lock().unwrap();
     match pad {
-        Ok(mut p) => {
-            // our own virtual pad also shows up in XInput; never read it back as "the real controller"
-            let virt = find_virtual_slot(&mut p)
-                .or_else(|| (0..20).find_map(|_| p.get_user_index().ok().or_else(|| { thread::sleep(Duration::from_millis(50)); None })));
+        Ok(p) => {
+            let mut l = s.live.lock().unwrap();
             // the real pad can't be hidden from games without a driver (HidHide): say so instead of silently doubling input
             l.status = if mirrors {
                 "Virtuelles Pad verbunden – ⚠ dein echter Controller ist fürs Spiel weiter sichtbar (doppelte Eingabe). Mit HidHide verstecken."
@@ -966,11 +1003,13 @@ fn connect_pad(s: &Shared, mirrors: bool) -> (Option<Xbox360Wired<Client>>, Opti
                 "Virtueller Xbox 360 Controller verbunden"
             }.into();
             l.vigem = true;
-            (Some(p), virt)
+            Some(p)
         }
         Err(e) => {
+            LOOKING.store(false, Relaxed);
+            let mut l = s.live.lock().unwrap();
             (l.status, l.vigem) = (format!("ViGEmBus fehlt ({e:?}) – nur Tastatur/Maus-Ausgabe aktiv"), false);
-            (None, None)
+            None
         }
     }
 }
@@ -981,7 +1020,7 @@ fn run(s: Arc<Shared>) {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
         CreateWaitableTimerExW(ptr::null(), ptr::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS)
     };
-    let (mut pad, mut virt): (Option<Xbox360Wired<Client>>, Option<u32>) = (None, None);
+    let (mut pad, mut virt): (Option<Xbox360Wired<Client>>, Option<u32>) = (None, None); // virt: from slot_scan_thread
     let mut vigem_t = Instant::now() - Duration::from_secs(10); // first tick may connect at once
     let mut p_seen: Option<Arc<Profile>> = None;
     let (mut want_pad, mut uses_pad, mut mirrors) = (None::<bool>, false, false);
@@ -998,6 +1037,7 @@ fn run(s: Arc<Shared>) {
     let mut pad_t: Option<Instant> = None; // when the last new controller report was seen
     let mut virt_pkt = 0u32;
     let mut virt_wait: Option<Instant> = None; // virtual pad update sent, not yet visible in XInput
+    let mut last_out_set = false;
 
     loop {
         let tick_t = Instant::now();
@@ -1020,7 +1060,9 @@ fn run(s: Arc<Shared>) {
             want_pad = Some(want);
             if !want {
                 if pad.take().is_some() { slot = None } // dropping it unplugs the virtual pad
-                (virt, virt_wait) = (None, None);
+                virt_wait = None;
+                LOOKING.store(false, Relaxed);
+                VIRT.store(NONE, Relaxed);
                 vigem_t = Instant::now() - Duration::from_secs(10); // switching on plugs it in at once
                 let mut l = s.live.lock().unwrap();
                 l.status = if uses_pad { "Aus – virtuelles Pad abgesteckt" } else { "Kein virtuelles Pad – der Controller geht direkt ans Spiel" }.into();
@@ -1030,18 +1072,26 @@ fn run(s: Arc<Shared>) {
         // (re)connect, also picks up ViGEmBus installed while running; a failed connect returns at once
         if want && pad.is_none() && vigem_t.elapsed() > Duration::from_secs(2) {
             vigem_t = Instant::now();
-            (pad, virt) = connect_pad(&s, mirrors);
+            pad = connect_pad(&s, mirrors);
             if pad.is_some() {
-                virt_pkt = virt.and_then(read_xinput).map_or(0, |v| v.0);
                 last = XGamepad::default();
+                *OUT.lock().unwrap() = Some(last);
                 slot = None; // rescan so the new virtual pad is never taken for the real one
             }
         }
 
         let mut phys = XGamepad::default();
-        if slot.is_none() && scan_t.elapsed() > Duration::from_millis(500) {
-            scan_t = Instant::now(); // empty XInput slots are slow to query, so rescan rarely
-            slot = (0..4).filter(|&i| Some(i) != virt).find(|&i| read_xinput(i).is_some());
+        let v = VIRT.load(Relaxed);
+        let found = (v != NONE).then_some(v as u32);
+        if found != virt {
+            virt = found;
+            virt_pkt = virt.and_then(read_xinput).map_or(0, |v| v.0);
+        }
+        let hint = SLOT_HINT.load(Relaxed);
+        let hint = (hint != NONE && Some(hint as u32) != virt).then_some(hint as u32);
+        // after a failed read wait for a fresh scan instead of re-reading a gone slot every tick
+        if hint != slot && scan_t.elapsed() > Duration::from_millis(600) {
+            slot = hint;
         }
         if let Some(i) = slot {
             match read_xinput(i) {
@@ -1056,7 +1106,7 @@ fn run(s: Arc<Shared>) {
                     }
                     phys = g;
                 }
-                None => slot = None,
+                None => (slot, scan_t) = (None, Instant::now()),
             }
         }
 
@@ -1082,9 +1132,12 @@ fn run(s: Arc<Shared>) {
             if let Some(pad) = &mut pad {
                 let _ = pad.update(&g);
                 virt_wait.get_or_insert_with(Instant::now);
+                *OUT.lock().unwrap() = Some(g);
             }
             last = g;
         }
+        if pad.is_none() && last_out_set { *OUT.lock().unwrap() = None }
+        last_out_set = pad.is_some();
         // read our own virtual pad back through XInput: how long until a game could see the update
         if let (Some(t0), Some(vi)) = (virt_wait, virt) {
             if let Some((pkt, _)) = read_xinput(vi).filter(|v| v.0 != virt_pkt) {
@@ -1122,7 +1175,23 @@ fn run(s: Arc<Shared>) {
     }
 }
 
-/// Raw mouse deltas (not cursor position), so aiming works even when the game locks the cursor.
+/// Message window of the input thread; null until it exists.
+static INPUT_HWND: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(ptr::null_mut());
+/// Last (hooks, raw mouse) state handed to the input thread, bit 0 / bit 1; 4 = nothing sent yet.
+static INPUTS_SENT: AtomicU8 = AtomicU8::new(4);
+const WM_SET_INPUTS: u32 = WM_APP + 1;
+
+/// Ask the input thread to (un)install the low-level hooks and the raw mouse sink. Cheap when unchanged.
+fn set_inputs(hooks: bool, raw: bool) {
+    let want = hooks as u8 | (raw as u8) << 1;
+    let hwnd = INPUT_HWND.load(Relaxed);
+    if INPUTS_SENT.load(Relaxed) != want && !hwnd.is_null() && unsafe { PostMessageW(hwnd, WM_SET_INPUTS, want as usize, 0) } != 0 {
+        INPUTS_SENT.store(want, Relaxed);
+    }
+}
+
+/// Input thread: owns the low-level hooks (to swallow keys mapped to the pad) and the raw mouse sink
+/// (mouse deltas for aim, also when the game locks the cursor). Both only exist while needed.
 fn raw_mouse_thread() {
     unsafe {
         let class = windows_sys::w!("padmimic_raw");
@@ -1130,12 +1199,9 @@ fn raw_mouse_thread() {
         let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: hinst, lpszClassName: class, ..mem::zeroed() };
         RegisterClassW(&wc);
         let hwnd = CreateWindowExW(0, class, class, 0, 0, 0, 0, 0, HWND_MESSAGE, ptr::null_mut(), hinst, ptr::null());
-        let rid = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd };
-        RegisterRawInputDevices(&rid, 1, mem::size_of::<RAWINPUTDEVICE>() as u32);
-        // every key and click on the system waits for these hooks: keep this thread first in line
+        // while hooked, every key and click on the system waits for this thread: keep it first in line
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-        SetWindowsHookExW(WH_KEYBOARD_LL, Some(winio::kb_hook), hinst, 0);
-        SetWindowsHookExW(WH_MOUSE_LL, Some(winio::mouse_hook), hinst, 0);
+        INPUT_HWND.store(hwnd, Relaxed);
         let mut msg = mem::zeroed();
         while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {
             DispatchMessageW(&msg);
@@ -1143,8 +1209,43 @@ fn raw_mouse_thread() {
     }
 }
 
+/// Runs on the input thread (hooks must be removed by the thread that set them).
+unsafe fn apply_inputs(hwnd: HWND, want: usize) {
+    use std::cell::Cell;
+    thread_local! {
+        static HOOKS: Cell<Option<(HHOOK, HHOOK)>> = const { Cell::new(None) };
+        static RAW: Cell<bool> = const { Cell::new(false) };
+    }
+    unsafe {
+        match (want & 1 != 0, HOOKS.get()) {
+            (true, None) => {
+                let hinst = GetModuleHandleW(ptr::null());
+                HOOKS.set(Some((SetWindowsHookExW(WH_KEYBOARD_LL, Some(winio::kb_hook), hinst, 0), SetWindowsHookExW(WH_MOUSE_LL, Some(winio::mouse_hook), hinst, 0))));
+            }
+            (false, Some((k, m))) => {
+                HOOKS.set(None);
+                UnhookWindowsHookEx(k);
+                UnhookWindowsHookEx(m);
+                for d in &winio::DOWN { d.store(false, Relaxed) } // unseen while unhooked: don't keep stale presses
+            }
+            _ => {}
+        }
+        let raw = want & 2 != 0;
+        if raw != RAW.get() {
+            RAW.set(raw);
+            let (flags, target) = if raw { (RIDEV_INPUTSINK, hwnd) } else { (RIDEV_REMOVE, ptr::null_mut()) };
+            let rid = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: flags, hwndTarget: target };
+            RegisterRawInputDevices(&rid, 1, mem::size_of::<RAWINPUTDEVICE>() as u32);
+        }
+    }
+}
+
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     unsafe {
+        if msg == WM_SET_INPUTS {
+            apply_inputs(h, w);
+            return 0;
+        }
         if msg == WM_INPUT {
             let mut ri: RAWINPUT = mem::zeroed();
             let mut size = mem::size_of::<RAWINPUT>() as u32;
