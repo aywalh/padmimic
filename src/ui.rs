@@ -16,9 +16,9 @@ use vigem_client::{XButtons, XGamepad};
 
 /// Retro terminal palette, modern spacing: ice-blue cyan for the real controller and "on",
 /// amber for what padmimic itself sends (virtual pad).
-struct Pal { panel: Color32, card: Color32, line: Color32, idle: Color32, hover: Color32, text: Color32, weak: Color32, acc: Color32, amber: Color32 }
+pub(crate) struct Pal { pub panel: Color32, pub card: Color32, pub line: Color32, pub idle: Color32, pub hover: Color32, pub text: Color32, pub weak: Color32, pub acc: Color32, pub amber: Color32 }
 
-fn pal(dark: bool) -> Pal {
+pub(crate) fn pal(dark: bool) -> Pal {
     let c = Color32::from_rgb;
     if dark {
         Pal { panel: c(10, 12, 15), card: c(17, 20, 26), line: c(38, 46, 58), idle: c(26, 31, 40), hover: c(36, 44, 56), text: c(214, 226, 222), weak: c(118, 134, 140), acc: c(86, 214, 255), amber: c(255, 181, 71) }
@@ -32,7 +32,7 @@ pub fn accent(dark: bool) -> Color32 {
 }
 
 /// Retro heading / readout text.
-fn mono(s: f32) -> FontId {
+pub(crate) fn mono(s: f32) -> FontId {
     FontId::monospace(s)
 }
 
@@ -101,13 +101,13 @@ pub fn style(ctx: &egui::Context) {
 }
 
 /// Soft neon halo around a rect.
-fn glow(p: &egui::Painter, r: Rect, radius: f32, c: Color32) {
+pub(crate) fn glow(p: &egui::Painter, r: Rect, radius: f32, c: Color32) {
     for (w, a) in [(7.0, 0.07), (4.0, 0.14), (2.0, 0.3)] {
         p.rect_stroke(r.expand(w / 2.0), radius + w / 2.0, Stroke::new(w, c.gamma_multiply(a)), StrokeKind::Outside);
     }
 }
 
-fn glow_circle(p: &egui::Painter, c: Pos2, r: f32, col: Color32) {
+pub(crate) fn glow_circle(p: &egui::Painter, c: Pos2, r: f32, col: Color32) {
     for (w, a) in [(7.0, 0.07), (4.0, 0.14), (2.0, 0.3)] {
         p.circle_stroke(c, r + w / 2.0, Stroke::new(w, col.gamma_multiply(a)));
     }
@@ -153,10 +153,10 @@ fn switch(ui: &mut egui::Ui, on: bool) -> bool {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum WinBtn { Min, Max, Restore, Close }
+pub(crate) enum WinBtn { Min, Max, Restore, Close }
 
 /// Minimize / maximize / close in the own title bar, drawn as lines (no font glyph needed); close lights red.
-fn win_btn(ui: &mut egui::Ui, kind: WinBtn) -> bool {
+pub(crate) fn win_btn(ui: &mut egui::Ui, kind: WinBtn) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 26.0), Sense::click());
     let c = pal(ui.visuals().dark_mode);
     let hot = resp.hovered();
@@ -215,7 +215,7 @@ fn window_edges(ctx: &egui::Context) {
 }
 
 /// Language tiles: own name big, English name small under it. Returns the clicked language.
-fn lang_grid(ui: &mut egui::Ui, current: usize, skip: &[usize]) -> Option<usize> {
+pub(crate) fn lang_grid(ui: &mut egui::Ui, current: usize, skip: &[usize]) -> Option<usize> {
     let c = pal(ui.visuals().dark_mode);
     let ids: Vec<usize> = (0..i18n::LANGS.len()).filter(|i| !skip.contains(i)).collect();
     let cols = if ui.available_width() > 420.0 { 3 } else { 2 };
@@ -550,7 +550,7 @@ pub type Trail = [std::collections::VecDeque<(f32, f32)>; 2];
 
 /// Live view: the real controller in phosphor green, padmimic's virtual pad output in amber.
 /// Sticks show dead zone and max zone of the current set plus a short motion trail.
-fn controller(ui: &mut egui::Ui, g: &XGamepad, out: Option<&XGamepad>, sticks: &[Stick; 2], trail: &mut Trail) {
+pub(crate) fn controller(ui: &mut egui::Ui, g: &XGamepad, out: Option<&XGamepad>, sticks: &[Stick; 2], trail: &mut Trail) {
     let w = ui.available_width().min(400.0);
     let h = w * 0.56;
     let (resp, p) = ui.allocate_painter(vec2(ui.available_width(), h + 30.0), Sense::hover());
@@ -1978,7 +1978,7 @@ impl App {
         ui.label(RichText::new(format!("padmimic {}", env!("CARGO_PKG_VERSION"))).strong());
         ui.label(tr("Controller, keyboard & mouse → keyboard, mouse and a virtual Xbox 360 controller."));
         ui.weak(tr("Mapping logic (slots, turbo, sets, zones, curves) modelled on AntiMicroX."));
-        ui.weak(tr("Open source under the GNU GPL v3."));
+        ui.weak(tr("Open source under the MIT License."));
         ui.hyperlink_to(format!("github.com/{}", update::REPO), format!("https://github.com/{}", update::REPO));
         Self::ok_row(ui)
     }

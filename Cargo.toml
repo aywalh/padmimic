@@ -1,9 +1,9 @@
 [package]
 name = "padmimic"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Controller remapper for Windows: real gamepad to keyboard, mouse and a virtual Xbox 360 controller"
-license = "GPL-3.0-or-later"
+license = "MIT"
 repository = "https://github.com/aywalh/padmimic"
 
 [dependencies]
@@ -11,7 +11,7 @@ eframe = { version = "0.36", default-features = false, features = ["glow", "defa
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 vigem-client = "0.1.4"
-windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input", "Win32_System_LibraryLoader", "Win32_Media", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_Security", "Win32_UI_Input_XboxController", "Win32_Globalization"] }
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input", "Win32_System_LibraryLoader", "Win32_Media", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_Security", "Win32_UI_Input_XboxController", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_UI_Shell", "Win32_System_Com"] }
 
 [profile.release]
 opt-level = 3

@@ -2,6 +2,7 @@
 mod engine;
 mod i18n;
 mod model;
+mod setup;
 mod ui;
 mod update;
 mod winio;
@@ -11,6 +12,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 fn main() -> eframe::Result {
+    // padmimic-setup.exe (same exe, other name) installs, --uninstall removes
+    if let Some(m) = setup::mode() { return setup::run(m) }
     // profiles/settings live next to the exe, wherever it is started from
     if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
         let _ = std::env::set_current_dir(dir);

@@ -40,7 +40,7 @@ pub fn newer(latest: &str, current: &str) -> bool {
     false
 }
 
-fn powershell(script: &str) -> Result<(i32, String), String> {
+pub(crate) fn powershell(script: &str) -> Result<(i32, String), String> {
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
         .creation_flags(NO_WINDOW)
@@ -107,10 +107,12 @@ if ((Get-FileHash $f -Algorithm SHA256).Hash -ne $want.ToUpper()) {{ Remove-Item
 pub fn cleanup() {
     let Ok((new, old, _)) = exe_paths() else { return };
     let _ = std::fs::remove_file(new);
+    if !old.exists() { return }
     // right after an update the old instance is still closing: retry for a few seconds
     std::thread::spawn(move || {
+        if let Some(dir) = old.parent() { crate::setup::refresh_version(dir) }
         for _ in 0..15 {
-            if !old.exists() || std::fs::remove_file(&old).is_ok() { return }
+            if std::fs::remove_file(&old).is_ok() || !old.exists() { return }
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
     });

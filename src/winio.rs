@@ -230,9 +230,13 @@ exit $p.ExitCode"
 
 /// Start with Windows via HKCU Run key.
 pub fn set_startup(on: bool) {
+    set_startup_for(on, &std::env::current_exe().unwrap_or_default());
+}
+
+pub fn set_startup_for(on: bool, exe: &std::path::Path) {
     use std::os::windows::process::CommandExt;
     let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+    let exe = exe.display().to_string();
     let mut c = std::process::Command::new("reg");
     if on {
         c.args(["add", key, "/v", "padmimic", "/t", "REG_SZ", "/d", &format!("\"{exe}\""), "/f"]);
