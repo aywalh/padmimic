@@ -1,71 +1,45 @@
 # padmimic
 
-Controller remapper for Windows, in the spirit of [AntiMicroX](https://github.com/AntiMicroX/antimicrox):
-your real gamepad goes straight to the game, and padmimic adds keyboard keys, mouse movement, mouse
-wheel and a virtual Xbox 360 controller on top — built for low input latency.
+![padmimic: Controller remapping for Windows](docs/banner.svg)
 
-![padmimic](docs/app.png)
+Map your controller to keys, mouse actions or a virtual Xbox 360 pad. Save layouts as profiles and check each input in the live preview.
 
-## Features
+## Set up a profile
 
-- Map every button, stick direction, trigger and D-pad direction to keys, mouse buttons, mouse
-  movement, wheel or virtual Xbox 360 controller outputs
-- AntiMicroX-style logic: slot sequences (hold, release, pause, cycle, distance zones, mouse speed
-  modifiers, text, run program, load profile), toggle, turbo (normal / gradient / pulse), 8 sets
-  with one-way / two-way / while-held switching, dead / max / square zones, mouse curves and
-  delta acceleration, spring mode
-- Keyboard & mouse → controller bindings and mouse → stick aim
-- Profiles, auto-profile per foreground program
-- Up to 8000 Hz engine on a high-resolution timer; system-wide input hooks only while they are needed
-- Live controller view, latency meter in its own window
-- English, Deutsch, 日本語, 简体中文, 한국어, Tiếng Việt, Filipino, العربية
-- Updates itself from GitHub releases (checksum-verified)
+1. Connect your pad and open **Controller** to check live inputs.
+2. Assign an output to a button, stick direction or trigger. Save the mappings as a profile.
+3. Turn padmimic **On**. Switch between up to eight mapping sets while playing.
 
-## Download
+![The redesigned padmimic controller view](docs/redesign.png)
 
-From the [latest release](https://github.com/aywalh/padmimic/releases/latest):
+## Make it yours
 
-- **`padmimic-setup.exe`** — installer. Per user, no admin rights: installs to
-  `%LOCALAPPDATA%\Programs\padmimic`, adds Start menu / desktop shortcuts and an entry in Windows
-  *Apps*, where it can be uninstalled again.
-- **`padmimic.exe`** — portable: put it in its own folder and run it.
+Choose from **39 static designs** under **Customization**, or import your own skin. Buttons, sticks and triggers respond to live input.
 
-Settings and profiles are stored next to the exe. Both versions update themselves.
+<details>
+<summary>See some of the controller designs</summary>
 
-![padmimic setup](docs/setup.png)
+![A selection of static designs](docs/static-designs.png)
 
-Requirements: Windows 10 or 11 (64-bit).
+</details>
 
-- For virtual controller outputs padmimic needs the [ViGEmBus](https://github.com/nefarius/ViGEmBus)
-  driver; it offers to install it for you.
-- Games still see your real controller as well. To hide it, use
-  [HidHide](https://github.com/nefarius/HidHide) and allow `padmimic.exe` there.
+## Put the controller on stream
 
-## Build from source
+Open the pop-out from the live preview or **Settings → Controller overlay**. Drag it to move, resize from an edge, and enable click-through when it is in place. For Discord, share the screen that contains the overlay.
 
-```
-cargo build --release
-```
+<details>
+<summary>See the appearance settings</summary>
 
-The exe is `target/release/padmimic.exe`. Tests: `cargo test --release`.
+![Appearance settings](docs/settings-redesign.png)
 
-The installer is the same exe: a copy whose name contains `setup` (or started with `--install`)
-shows the setup, `--uninstall` removes an installed copy (see `src/setup.rs`).
+</details>
 
-## Releasing
+## Install or build
 
-1. Set the new `version` in `Cargo.toml` and commit.
-2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+- **`padmimic-setup.exe`** installs per user on Windows 10 or 11.
+- **`padmimic.exe`** is portable. Its settings and profiles live beside the executable.
+- For virtual gamepad output, install [ViGEmBus](https://github.com/nefarius/ViGEmBus). Keyboard and mouse mappings can be used without that driver.
 
-GitHub Actions builds the exe, writes `padmimic.exe.sha256`, adds `padmimic-setup.exe` and
-publishes the release; running copies of padmimic offer the update on their next start.
+Run `cargo test --locked` to test and `./release.ps1` to build with remapped build paths. For automatic update checks in self-built copies, set `PADMIMIC_UPDATE_REPOSITORY` to a public repository in `owner/name` format at build time. Other builds can be updated manually.
 
-## Translations
-
-`lang/_keys.json` lists every English UI text; each `lang/<code>.json` maps it to a translation.
-Missing entries fall back to English. Keep every `{}` placeholder.
-
-## License
-
-MIT, see [LICENSE](LICENSE). padmimic is an independent project and not affiliated
-with AntiMicroX, Microsoft or Nefarius.
+[MIT License](LICENSE) · [Controller catalog](docs/controllers.md) · [Overlay guide](docs/controller-overlay.md)

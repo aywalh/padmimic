@@ -366,6 +366,22 @@ pub enum Input {
     Pad(Out),
 }
 
+/// Independent live-controller window; old settings files use these defaults.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct OverlaySettings {
+    pub enabled: bool,
+    pub always_on_top: bool,
+    pub locked: bool,
+    pub size: [f32; 2],
+    pub position: Option<[f32; 2]>,
+}
+impl Default for OverlaySettings {
+    fn default() -> Self {
+        Self { enabled: false, always_on_top: true, locked: false, size: [480., 417.], position: None }
+    }
+}
+
 /// Global program settings (AntiMicroX "Edit Settings").
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(default)]
@@ -393,6 +409,30 @@ pub struct Settings {
     /// UI language code ("en", "de", …); empty = not chosen yet, ask on start.
     pub lang: String,
     pub check_updates: bool,
+    /// Look: 0 follow Windows, 1 dark, 2 light.
+    pub theme: u8,
+    /// Accent colour, index into ui::ACCENTS.
+    pub accent: u8,
+    /// Match UI accent to the selected included controller without overwriting the manual preset.
+    pub pad_accent: bool,
+    /// Window background: 0 solid, 1 aurora (own animated gradient), 2 Mica, 3 Acrylic (Windows 11 materials).
+    pub backdrop: u8,
+    /// How much the panels cover the background (0.2 = very glassy, 1 = solid).
+    pub opacity: f32,
+    /// Where settings open: 0 beside the window (right, else left; inside when maximized), 1 inside the app.
+    pub dock: u8,
+    /// Treat adjacent monitor work areas as one desktop when positioning settings.
+    pub smart_docking: bool,
+    /// Animations on.
+    pub motion: bool,
+    /// Size of everything: 0 small, 1 medium, 2 large (see ui::SIZES).
+    pub size: u8,
+    /// Controller catalog index. Legacy indices 0/1/2 retain Xbox / DualSense / DualShock 4.
+    pub pad_model: u8,
+    /// Stable builtin:<catalog-id>, an own skin folder name, or empty for a legacy choice.
+    pub pad_skin: String,
+    pub overlay: OverlaySettings,
+    pub tray_variant: usize,
 }
 
 impl Default for Settings {
@@ -404,7 +444,8 @@ impl Default for Settings {
             smoothing: false, history: 10, weight: 0.2, mouse_refresh: 1, auto_profile: false, auto_profiles: vec![],
             toggle: Input::Key(0x77),
             lang: String::new(),
-            check_updates: true,
+            check_updates: crate::update::repository().is_some(),
+            theme: 1, accent: 0, pad_accent: true, backdrop: 3, opacity: 0.62, dock: 0, smart_docking: true, motion: true, size: 0, pad_model: 0, pad_skin: String::new(), overlay: OverlaySettings::default(), tray_variant: 0,
         }
     }
 }

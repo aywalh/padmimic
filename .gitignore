@@ -1,3 +1,10 @@
-/target
-/src.backup-*
-/media
+/target/
+/dist/
+/padcraft/
+/media/
+/src.backup-*/
+/settings.json
+/profiles/
+/skins/
+*.exe
+*.pdb

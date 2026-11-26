@@ -6,41 +6,136 @@ use crate::i18n::{self, tr, trf};
 use crate::update::{self, State as Upd};
 use crate::model::*;
 use crate::winio;
-use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Theme, Vec2, vec2};
+use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Theme, Vec2, vec2};
 use std::sync::Arc;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering::Relaxed};
+use crate::icons::{self, Icon};
 use std::time::{Duration, Instant};
-use vigem_client::{XButtons, XGamepad};
+use vigem_client::XGamepad;
 
 // ================================================================= look
 
-/// Retro terminal palette, modern spacing: ice-blue cyan for the real controller and "on",
-/// amber for what padmimic itself sends (virtual pad).
-pub(crate) struct Pal { pub panel: Color32, pub card: Color32, pub line: Color32, pub idle: Color32, pub hover: Color32, pub text: Color32, pub weak: Color32, pub acc: Color32, pub amber: Color32 }
+/// Accent colours to pick from (Settings → Appearance).
+pub(crate) const ACCENTS: [(&str, [u8; 3]); 6] = [
+    ("Blue", [36, 150, 255]), ("Violet", [132, 102, 255]), ("Pink", [255, 66, 140]),
+    ("Orange", [255, 130, 36]), ("Green", [28, 190, 118]), ("Teal", [0, 180, 196]),
+];
+
+/// Zoom for Settings → Appearance → Size: small (default), medium, large.
+pub(crate) const SIZES: [f32; 3] = [0.67, 0.8, 1.0];
+
+static ACCENT: AtomicU8 = AtomicU8::new(0);
+static DESIGN_ACCENT: AtomicU32 = AtomicU32::new(0);
+fn set_design_accent(color: Option<[u8;3]>) -> bool {
+    let packed=color.map(|[r,g,b]|0x01000000|((r as u32)<<16)|((g as u32)<<8)|b as u32).unwrap_or(0);
+    DESIGN_ACCENT.swap(packed,Relaxed)!=packed
+}
+/// How much the panels cover the window background, in percent: 100 = solid, lower = glass.
+static COVER: AtomicU8 = AtomicU8::new(100);
+static MOTION: AtomicBool = AtomicBool::new(true);
+
+pub(crate) fn set_look(accent: u8, cover: f32, motion: bool) {
+    ACCENT.store(accent, Relaxed);
+    COVER.store((cover.clamp(0.0, 1.0) * 100.0).round() as u8, Relaxed);
+    MOTION.store(motion, Relaxed);
+}
+
+pub(crate) fn motion() -> bool {
+    MOTION.load(Relaxed)
+}
+
+/// Black-and-white canvas with one accent, like a social timeline: cards and controls are a step
+/// lighter (or darker), lines are hairlines. `amber` is the coral of the virtual pad output.
+pub(crate) struct Pal { pub side: Color32, pub panel: Color32, pub card: Color32, pub line: Color32, pub idle: Color32, pub hover: Color32, pub text: Color32, pub weak: Color32, pub acc: Color32, pub amber: Color32 }
 
 pub(crate) fn pal(dark: bool) -> Pal {
+    pal_with(dark, COVER.load(Relaxed) as f32 / 100.0)
+}
+
+/// `cover` < 1 makes the surfaces see-through (premultiplied alpha), for aurora / Mica / Acrylic.
+pub(crate) fn pal_with(dark: bool, cover: f32) -> Pal {
     let c = Color32::from_rgb;
-    if dark {
-        Pal { panel: c(10, 12, 15), card: c(17, 20, 26), line: c(38, 46, 58), idle: c(26, 31, 40), hover: c(36, 44, 56), text: c(214, 226, 222), weak: c(118, 134, 140), acc: c(86, 214, 255), amber: c(255, 181, 71) }
+    let design=DESIGN_ACCENT.load(Relaxed);
+    let a=if design!=0 { [(design>>16) as u8,(design>>8) as u8,design as u8] } else { ACCENTS[ACCENT.load(Relaxed) as usize % ACCENTS.len()].1 };
+    let acc = c(a[0], a[1], a[2]);
+    let mut p = if dark {
+        Pal { side: c(0, 0, 0), panel: c(0, 0, 0), card: c(22, 24, 28), line: c(47, 51, 54), idle: c(32, 35, 39), hover: c(45, 49, 54), text: c(231, 233, 234), weak: c(113, 118, 123), acc, amber: c(255, 122, 89) }
     } else {
-        Pal { panel: c(232, 226, 210), card: c(244, 239, 226), line: c(196, 186, 162), idle: c(226, 219, 200), hover: c(214, 205, 182), text: c(40, 38, 34), weak: c(120, 112, 96), acc: c(0, 112, 170), amber: c(190, 104, 0) }
+        Pal { side: c(255, 255, 255), panel: c(255, 255, 255), card: c(246, 248, 249), line: c(232, 236, 238), idle: c(237, 241, 243), hover: c(224, 230, 233), text: c(15, 20, 25), weak: c(83, 100, 113), acc, amber: c(232, 88, 52) }
+    };
+    if cover < 1.0 {
+        let glass = |x: Color32, f: f32| x.gamma_multiply(f.clamp(0.0, 1.0));
+        p.side = glass(p.side, cover);
+        p.panel = glass(p.panel, cover * 0.8);
+        p.card = glass(p.card, cover + 0.3);
+        p.idle = glass(p.idle, cover + 0.45);
+        p.hover = glass(p.hover, cover + 0.5);
+        p.line = glass(p.line, 0.8);
     }
+    p
 }
 
 pub fn accent(dark: bool) -> Color32 {
     pal(dark).acc
 }
 
-/// Retro heading / readout text.
+/// Numeric readouts (digits line up).
 pub(crate) fn mono(s: f32) -> FontId {
     FontId::monospace(s)
 }
 
-/// Windows fonts: Segoe UI / Cascadia Mono for Latin, then fallbacks for Japanese, Chinese, Korean
-/// and Arabic. The current language's CJK font goes first, because the same Han character is drawn
-/// differently in Japanese and Chinese.
+/// Semibold UI font for titles, buttons and selected items.
+pub(crate) fn bold(s: f32) -> FontId {
+    FontId::new(s, egui::FontFamily::Name("bold".into()))
+}
+
+pub(crate) const FRAME_60: Duration = Duration::from_nanos(16_666_667);
+
+/// Pace the native UI once per frame, including frames that draw the Settings window.
+#[derive(Default)]
+struct FramePacer {
+    frame: Option<u64>,
+    next: Option<Instant>,
+}
+
+impl FramePacer {
+    fn wait(&mut self, frame: u64) {
+        if self.frame == Some(frame) { return; }
+        self.frame = Some(frame);
+        let now = Instant::now();
+        let deadline = self.next.unwrap_or(now);
+        if let Some(delay) = deadline.checked_duration_since(now) {
+            std::thread::sleep(delay);
+        }
+        let actual = Instant::now();
+        // Rebase after an idle interval instead of trying to render missed frames.
+        self.next = Some(if actual.saturating_duration_since(deadline) >= FRAME_60 {
+            actual + FRAME_60
+        } else {
+            deadline + FRAME_60
+        });
+    }
+}
+
+/// 0..1 → 0..1, fast start, soft landing.
+pub(crate) fn ease(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
+
+/// Animated 0/1 that respects the "Animations" setting.
+pub(crate) fn anim(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, on: bool, secs: f32) -> f32 {
+    ctx.animate_bool_with_time(egui::Id::new(id), on, if motion() { secs } else { 0.0 })
+}
+
+pub(crate) fn anim_to(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug, v: f32, secs: f32) -> f32 {
+    ctx.animate_value_with_time(egui::Id::new(id), v, if motion() { secs } else { 0.0 })
+}
+
+/// Windows fonts: Segoe UI (regular + semibold) / Cascadia Mono for Latin, then fallbacks for
+/// Japanese, Chinese, Korean and Arabic. The current language's CJK font goes first, because the
+/// same Han character is drawn differently in Japanese and Chinese.
 pub fn set_fonts(ctx: &egui::Context) {
-    use egui::FontFamily::{Monospace, Proportional};
+    use egui::FontFamily::{Monospace, Name, Proportional};
     let mut fonts = egui::FontDefinitions::default();
     let mut load = |name: &str, file: &str| {
         let ok = std::fs::read(format!(r"C:\Windows\Fonts\{file}")).map(|d| fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(d)))).is_ok();
@@ -49,8 +144,9 @@ pub fn set_fonts(ctx: &egui::Context) {
     // Segoe UI Variable has no Arabic glyphs, so Arabic words always become shaping runs of their own
     // (needed for right-to-left order, see i18n::rtl); plain Segoe UI only if it is missing
     let ui_font = load("ui", "SegUIVar.ttf").or_else(|| load("ui", "segoeui.ttf"));
+    let ui_bold = load("uib", "seguisb.ttf").or_else(|| load("uib", "segoeuib.ttf"));
     let mono = [load("mono", "CascadiaMono.ttf"), load("mono2", "consola.ttf")];
-    let (ja, zh, ko) = (load("ja", "YuGothM.ttc"), load("zh", "msyh.ttc"), load("ko", "malgun.ttf"));
+    let (ja, zh, ko) = (load("ja", "YuGothB.ttc").or_else(|| load("ja", "YuGothM.ttc")), load("zh", "msyhbd.ttc").or_else(|| load("zh", "msyh.ttc")), load("ko", "malgunbd.ttf").or_else(|| load("ko", "malgun.ttf")));
     let ar = load("ar", "arial.ttf");
     let cjk = match i18n::cur() { 2 => [ja, zh, ko], 4 => [ko, ja, zh], _ => [zh, ja, ko] };
     let fallbacks: Vec<String> = cjk.into_iter().chain([ar]).flatten().collect();
@@ -59,57 +155,63 @@ pub fn set_fonts(ctx: &egui::Context) {
         for (i, f) in first.into_iter().flatten().enumerate() { list.insert(i, f) }
         list.extend(fallbacks.iter().cloned());
     }
+    // Segoe UI Semibold has Arabic glyphs, which would break the right-to-left trick (see i18n::rtl):
+    // Arabic gets the regular weight everywhere
+    let mut b: Vec<String> = ui_bold.filter(|_| i18n::cur() != i18n::AR).into_iter().collect();
+    b.extend(fonts.families[&Proportional].iter().cloned());
+    fonts.families.insert(Name("bold".into()), b);
     ctx.set_fonts(fonts);
 }
 
 pub fn style(ctx: &egui::Context) {
     set_fonts(ctx);
     ctx.all_styles_mut(|s| {
-        s.spacing.item_spacing = vec2(8.0, 7.0);
-        s.spacing.button_padding = vec2(10.0, 5.0);
-        s.spacing.interact_size.y = 24.0;
+        s.spacing.item_spacing = vec2(8.0, 8.0);
+        s.spacing.button_padding = vec2(14.0, 7.0);
+        s.spacing.interact_size.y = 30.0;
+        s.spacing.window_margin = egui::Margin::same(20);
+        s.spacing.menu_margin = egui::Margin::same(8);
         s.text_styles.insert(egui::TextStyle::Body, FontId::proportional(14.0));
-        s.text_styles.insert(egui::TextStyle::Button, mono(13.0));
-        s.text_styles.insert(egui::TextStyle::Small, FontId::proportional(11.5));
-        s.text_styles.insert(egui::TextStyle::Heading, mono(18.0));
+        s.text_styles.insert(egui::TextStyle::Button, bold(13.5));
+        s.text_styles.insert(egui::TextStyle::Small, FontId::proportional(12.0));
+        s.text_styles.insert(egui::TextStyle::Heading, bold(18.0));
+        s.animation_time = 0.18;
         let v = &mut s.visuals;
         for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-            w.corner_radius = CornerRadius::same(4);
+            w.corner_radius = CornerRadius::same(16); // pills at control height
+            w.expansion = 0.0;
         }
-        v.window_corner_radius = CornerRadius::same(6);
-        v.menu_corner_radius = CornerRadius::same(4);
+        v.window_corner_radius = CornerRadius::same(22);
+        v.menu_corner_radius = CornerRadius::same(14);
+        v.window_shadow = egui::Shadow { offset: [0, 16], blur: 48, spread: 0, color: Color32::from_black_alpha(110) };
+        v.popup_shadow = egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(80) };
     });
+    apply_colors(ctx);
+}
+
+/// Colours for both themes; again after the accent or the glass level changed.
+pub(crate) fn apply_colors(ctx: &egui::Context) {
     for (theme, dark) in [(Theme::Light, false), (Theme::Dark, true)] {
         ctx.style_mut_of(theme, |s| {
             let c = pal(dark);
+            let solid = pal_with(dark, 1.0); // menus and sheets float over content: never see-through
             let v = &mut s.visuals;
             v.panel_fill = c.panel;
-            v.window_fill = c.card;
-            v.window_stroke = Stroke::new(1.0, c.line);
+            v.window_fill = solid.card;
+            v.window_stroke = Stroke::new(1.0, solid.line);
             v.extreme_bg_color = c.idle;
             v.faint_bg_color = c.idle;
+            v.code_bg_color = c.idle;
             v.override_text_color = Some(c.text);
             v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, c.line);
-            for (w, fill, line) in [(&mut v.widgets.inactive, c.idle, c.line), (&mut v.widgets.hovered, c.hover, c.acc), (&mut v.widgets.active, c.hover, c.acc), (&mut v.widgets.open, c.hover, c.line)] {
-                (w.weak_bg_fill, w.bg_fill, w.bg_stroke) = (fill, fill, Stroke::new(1.0, line));
+            // flat controls: fill only, the accent shows up on focus and selection
+            for (w, fill) in [(&mut v.widgets.inactive, c.idle), (&mut v.widgets.hovered, c.hover), (&mut v.widgets.active, c.hover), (&mut v.widgets.open, c.hover)] {
+                (w.weak_bg_fill, w.bg_fill, w.bg_stroke) = (fill, fill, Stroke::NONE);
             }
-            v.selection.bg_fill = c.acc.gamma_multiply(0.35);
-            v.selection.stroke = Stroke::new(1.0, c.acc);
+            v.selection.bg_fill = c.acc.gamma_multiply(0.3);
+            v.selection.stroke = Stroke::new(1.5, c.acc);
             v.hyperlink_color = c.acc;
         });
-    }
-}
-
-/// Soft neon halo around a rect.
-pub(crate) fn glow(p: &egui::Painter, r: Rect, radius: f32, c: Color32) {
-    for (w, a) in [(7.0, 0.07), (4.0, 0.14), (2.0, 0.3)] {
-        p.rect_stroke(r.expand(w / 2.0), radius + w / 2.0, Stroke::new(w, c.gamma_multiply(a)), StrokeKind::Outside);
-    }
-}
-
-pub(crate) fn glow_circle(p: &egui::Painter, c: Pos2, r: f32, col: Color32) {
-    for (w, a) in [(7.0, 0.07), (4.0, 0.14), (2.0, 0.3)] {
-        p.circle_stroke(c, r + w / 2.0, Stroke::new(w, col.gamma_multiply(a)));
     }
 }
 
@@ -117,17 +219,14 @@ fn card<R>(ui: &mut egui::Ui, title: &str, f: impl FnOnce(&mut egui::Ui) -> R) -
     let c = pal(ui.visuals().dark_mode);
     egui::Frame::new()
         .fill(c.card)
-        .stroke(Stroke::new(1.0, c.line))
-        .corner_radius(6)
-        .inner_margin(12)
+        .corner_radius(20)
+        .inner_margin(18)
         .show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.set_width(ui.available_width());
                 if !title.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("▌").font(mono(13.0)).color(c.acc));
-                        ui.label(RichText::new(title.to_uppercase()).font(mono(12.5)).color(c.weak));
-                    });
+                    ui.label(RichText::new(title).font(bold(16.0)).color(c.text));
+                    ui.add_space(2.0);
                 }
                 f(ui)
             })
@@ -136,44 +235,108 @@ fn card<R>(ui: &mut egui::Ui, title: &str, f: impl FnOnce(&mut egui::Ui) -> R) -
         .inner
 }
 
-/// Retro power switch: LED + ON/OFF.
-fn switch(ui: &mut egui::Ui, on: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(vec2(78.0, 28.0), Sense::click());
+/// iOS-style switch: the knob stretches while pressed and springs across.
+pub(crate) fn switch(ui: &mut egui::Ui, on: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(48.0, 28.0), Sense::click());
     let c = pal(ui.visuals().dark_mode);
-    let t = ui.ctx().animate_bool_responsive(resp.id, on);
+    let t = ease(anim(ui.ctx(), resp.id, on, 0.22));
+    let press = anim(ui.ctx(), resp.id.with("press"), resp.is_pointer_button_down_on(), 0.12);
     let p = ui.painter();
-    p.rect_filled(rect, 4.0, if resp.hovered() { c.hover } else { c.idle });
-    p.rect_stroke(rect, 4.0, Stroke::new(1.0, if on { c.acc } else { c.line }), StrokeKind::Inside);
-    let led = Pos2::new(rect.left() + 15.0, rect.center().y);
-    let lc = if on { c.acc } else { c.weak.gamma_multiply(0.5) };
-    if on { glow_circle(p, led, 4.0, c.acc.gamma_multiply(t)) }
-    p.circle_filled(led, 4.0, lc);
-    p.text(Pos2::new(rect.left() + 28.0, rect.center().y), Align2::LEFT_CENTER, tr(if on { "ON" } else { "OFF" }), mono(12.5), if on { c.acc } else { c.weak });
+    let off = if resp.hovered() { c.hover } else { c.idle };
+    p.rect_filled(rect, 14.0, off.lerp_to_gamma(c.acc, t));
+    let kw = 24.0 + 6.0 * press;
+    let x = egui::lerp(rect.left() + 2.0..=rect.right() - 2.0 - kw, t);
+    let knob = Rect::from_min_size(Pos2::new(x, rect.top() + 2.0), vec2(kw, 24.0));
+    p.rect_filled(knob.translate(vec2(0.0, 1.0)), 12.0, Color32::from_black_alpha(45));
+    p.rect_filled(knob, 12.0, Color32::WHITE);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
+/// Round icon button (title bar, headers): soft circle on hover.
+pub(crate) fn icon_btn(ui: &mut egui::Ui, icon: Icon, size: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let c = pal(ui.visuals().dark_mode);
+    let h = anim(ui.ctx(), resp.id, resp.hovered(), 0.12);
+    let p = ui.painter();
+    if h > 0.0 { p.circle_filled(rect.center(), size / 2.0, c.hover.gamma_multiply(h)); }
+    icons::draw(p, icon, rect.shrink(size * 0.25), if h > 0.5 { c.text } else { c.weak.lerp_to_gamma(c.text, h) });
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Bold pill button; `filled` = accent background (the main action).
+pub(crate) fn pill(ui: &mut egui::Ui, text: &str, filled: bool) -> egui::Response {
+    let c = pal(ui.visuals().dark_mode);
+    let font = bold(14.0);
+    let g = ui.painter().layout_no_wrap(text.to_string(), font, c.text);
+    let (rect, resp) = ui.allocate_exact_size(vec2(g.size().x + 36.0, 36.0), Sense::click());
+    let h = anim(ui.ctx(), resp.id, resp.hovered(), 0.12);
+    let press = anim(ui.ctx(), resp.id.with("p"), resp.is_pointer_button_down_on(), 0.08);
+    let r = rect.shrink(press * 1.5);
+    let p = ui.painter();
+    if filled {
+        p.rect_filled(r, 18.0, c.acc.lerp_to_gamma(Color32::WHITE, 0.12 * h));
+        p.galley_with_override_text_color(r.center() - g.size() / 2.0, g, Color32::WHITE);
+    } else {
+        p.rect_filled(r, 18.0, c.idle.lerp_to_gamma(c.hover, h));
+        p.galley(r.center() - g.size() / 2.0, g, c.text);
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Settings row: text on the left, switch on the right, the whole row is clickable.
+pub(crate) fn row_switch(ui: &mut egui::Ui, on: &mut bool, text: &str) -> egui::Response {
+    let c = pal(ui.visuals().dark_mode);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+    let galley = ui.painter().layout(text.to_string(), FontId::proportional(14.5), c.text, rect.width() - 80.0);
+    ui.painter().galley(Pos2::new(rect.left() + 2.0, rect.center().y - galley.size().y / 2.0), galley, c.text);
+    let sw = Rect::from_min_size(Pos2::new(rect.right() - 50.0, rect.center().y - 14.0), vec2(48.0, 28.0));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(sw).id_salt(("rs", text)));
+    let clicked = switch(&mut child, *on);
+    if clicked || resp.clicked() { *on = !*on }
+    resp
+}
+
+/// Segmented control with a thumb that slides to the chosen option.
+pub(crate) fn segmented(ui: &mut egui::Ui, id: &str, sel: &mut u8, options: &[&str]) {
+    let c = pal(ui.visuals().dark_mode);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width().min(420.0), 36.0), Sense::hover());
+    let n = options.len() as f32;
+    let w = (rect.width() - 6.0) / n;
+    let p = ui.painter();
+    p.rect_filled(rect, 18.0, c.idle);
+    let x = anim_to(ui.ctx(), ("seg", id), *sel as f32, 0.22);
+    let thumb = Rect::from_min_size(Pos2::new(rect.left() + 3.0 + x * w, rect.top() + 3.0), vec2(w, 30.0));
+    p.rect_filled(thumb.translate(vec2(0.0, 1.0)), 15.0, Color32::from_black_alpha(30));
+    p.rect_filled(thumb, 15.0, if ui.visuals().dark_mode { c.hover.lerp_to_gamma(Color32::WHITE, 0.08) } else { Color32::WHITE });
+    for (i, o) in options.iter().enumerate() {
+        let r = Rect::from_min_size(Pos2::new(rect.left() + 3.0 + i as f32 * w, rect.top() + 3.0), vec2(w, 30.0));
+        let resp = ui.interact(r, ui.id().with((id, i)), Sense::click());
+        let on = *sel as usize == i;
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, *o, if on { bold(13.0) } else { FontId::proportional(13.0) }, if on { c.text } else { c.weak });
+        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { *sel = i as u8 }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum WinBtn { Min, Max, Restore, Close }
 
-/// Minimize / maximize / close in the own title bar, drawn as lines (no font glyph needed); close lights red.
+/// Minimize / maximize / close in the own title bar, drawn as lines (no font glyph needed); close turns red.
 pub(crate) fn win_btn(ui: &mut egui::Ui, kind: WinBtn) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 26.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 32.0), Sense::click());
     let c = pal(ui.visuals().dark_mode);
     let hot = resp.hovered();
-    let col = if kind == WinBtn::Close && hot { Color32::from_rgb(255, 90, 80) } else if hot { c.acc } else { c.weak };
+    let red = kind == WinBtn::Close && hot;
+    let col = if red { Color32::WHITE } else if hot { c.text } else { c.weak };
     let p = ui.painter();
-    if hot {
-        p.rect_filled(rect, 4.0, col.gamma_multiply(0.15));
-        p.rect_stroke(rect, 4.0, Stroke::new(1.0, col), StrokeKind::Inside);
-    }
-    let (m, s) = (rect.center(), Stroke::new(1.4, col));
+    if hot { p.rect_filled(rect, 16.0, if red { Color32::from_rgb(232, 65, 66) } else { c.hover }); }
+    let (m, s) = (rect.center(), Stroke::new(1.2, col));
     let box_at = |o: Vec2| Rect::from_center_size(m + o, vec2(9.0, 9.0));
     match kind {
         WinBtn::Min => { p.hline((m.x - 5.0)..=(m.x + 5.0), m.y + 1.0, s); }
         WinBtn::Max => { p.rect_stroke(box_at(Vec2::ZERO), 1.0, s, StrokeKind::Inside); }
         WinBtn::Restore => {
             p.rect_stroke(box_at(vec2(1.5, -1.5)), 1.0, s, StrokeKind::Inside);
-            p.rect_filled(box_at(vec2(-1.5, 1.5)), 1.0, if hot { col.gamma_multiply(0.15) } else { c.panel });
+            p.rect_filled(box_at(vec2(-1.5, 1.5)), 1.0, if hot { c.hover } else { c.panel });
             p.rect_stroke(box_at(vec2(-1.5, 1.5)), 1.0, s, StrokeKind::Inside);
         }
         WinBtn::Close => {
@@ -185,15 +348,10 @@ pub(crate) fn win_btn(ui: &mut egui::Ui, kind: WinBtn) -> bool {
 }
 
 /// The window has no Windows frame: resize from its edges, and draw a thin border.
-fn window_edges(ctx: &egui::Context) {
+fn window_edges(ctx: &egui::Context, own_max: bool) {
     use egui::{CursorIcon as C, ResizeDirection as D};
     let r = ctx.content_rect();
-    let c = pal(ctx.theme() == Theme::Dark);
-    let maxed = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-    if !maxed {
-        ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("frame")))
-            .rect_stroke(r, 0.0, Stroke::new(1.0, c.line), StrokeKind::Inside);
-    }
+    let maxed = own_max || ctx.input(|i| i.viewport().maximized.unwrap_or(false));
     let Some(pos) = ctx.input(|i| i.pointer.hover_pos()).filter(|_| !maxed) else { return };
     let m = 6.0;
     let (l, rt, t, b) = (pos.x < r.left() + m, pos.x > r.right() - m, pos.y < r.top() + m, pos.y > r.bottom() - m);
@@ -223,16 +381,15 @@ pub(crate) fn lang_grid(ui: &mut egui::Ui, current: usize, skip: &[usize]) -> Op
     let mut hit = None;
     egui::Grid::new(("langs", skip.len())).spacing([8.0, 8.0]).show(ui, |ui| {
         for (n, &i) in ids.iter().enumerate() {
-            let (rect, resp) = ui.allocate_exact_size(vec2(w, 46.0), Sense::click());
+            let (rect, resp) = ui.allocate_exact_size(vec2(w, 54.0), Sense::click());
             let on = i == current;
-            let hot = resp.hovered();
+            let h = anim(ui.ctx(), resp.id, resp.hovered(), 0.12);
             let p = ui.painter();
-            if on { glow(p, rect, 4.0, c.acc) }
-            p.rect_filled(rect, 4.0, if on { c.acc.gamma_multiply(0.2) } else if hot { c.hover } else { c.idle });
-            p.rect_stroke(rect, 4.0, Stroke::new(1.0, if on || hot { c.acc } else { c.line }), StrokeKind::Inside);
-            p.text(rect.center() - vec2(0.0, 7.0), Align2::CENTER_CENTER, i18n::native(i), FontId::proportional(15.0), if on { c.acc } else { c.text });
+            p.rect_filled(rect, 16.0, if on { c.acc.gamma_multiply(0.18) } else { c.idle.lerp_to_gamma(c.hover, h) });
+            if on { p.rect_stroke(rect, 16.0, Stroke::new(1.5, c.acc), StrokeKind::Inside); }
+            p.text(rect.center() - vec2(0.0, 8.0), Align2::CENTER_CENTER, i18n::native(i), FontId::proportional(15.5), if on { c.acc } else { c.text });
             let english = ["English", "German", "Japanese", "Chinese (Simplified)", "Korean", "Vietnamese", "Filipino", "Arabic"][i];
-            p.text(rect.center() + vec2(0.0, 11.0), Align2::CENTER_CENTER, english, mono(10.0), c.weak);
+            p.text(rect.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, english, FontId::proportional(11.5), c.weak);
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { hit = Some(i) }
             if n % cols == cols - 1 { ui.end_row() }
         }
@@ -240,28 +397,84 @@ pub(crate) fn lang_grid(ui: &mut egui::Ui, current: usize, skip: &[usize]) -> Op
     hit
 }
 
-/// A grid cell like AntiMicro's button widgets: caption + current assignment, lit while pressed.
-fn cell(ui: &mut egui::Ui, title: &str, body: &str, active: bool, size: Vec2) -> egui::Response {
+/// A grid cell like AntiMicro's button widgets: caption + current assignment, lit while pressed,
+/// with an optional icon in front of the body (element settings) and small marks
+/// (turbo, toggle) in the top right corner. Lifts on hover, sinks when pressed, glows while active.
+fn cell_ex(ui: &mut egui::Ui, icon: Option<Icon>, marks: &[Icon], title: &str, body: &str, active: bool, size: Vec2) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let c = pal(ui.visuals().dark_mode);
+    let ctx = ui.ctx().clone();
+    let h = anim(&ctx, resp.id, resp.hovered(), 0.14);
+    let a = anim(&ctx, resp.id.with("a"), active, 0.08);
+    let press = anim(&ctx, resp.id.with("p"), resp.is_pointer_button_down_on(), 0.07);
+    let r = rect.shrink(press * 2.0);
     let p = ui.painter();
     let empty = body == "—";
-    if active { glow(p, rect, 4.0, c.acc) }
-    p.rect_filled(rect, 4.0, if active { c.acc.gamma_multiply(0.22) } else if resp.hovered() { c.hover } else { c.idle });
-    p.rect_stroke(rect, 4.0, Stroke::new(1.0, if active || resp.hovered() { c.acc } else { c.line }), StrokeKind::Inside);
-    let (tc, bc) = if active { (c.acc, c.acc) } else { (c.weak, if empty { c.weak.gamma_multiply(0.6) } else { c.text }) };
-    let max_chars = ((size.x - 14.0) / 7.0).max(3.0) as usize;
+    p.rect_filled(r, 14.0, c.idle.lerp_to_gamma(c.hover, h).lerp_to_gamma(c.acc.gamma_multiply(0.35), a));
+    if a > 0.0 { p.rect_stroke(r, 14.0, Stroke::new(1.5, c.acc.gamma_multiply(a)), StrokeKind::Inside); }
+    let (tc, bc) = (c.weak.lerp_to_gamma(c.acc, a), if empty { c.weak.gamma_multiply(0.55) } else { c.text });
+    let room = size.x - 20.0 - if icon.is_some() { 20.0 } else { 0.0 };
+    let max_chars = (room / 7.2).max(3.0) as usize;
     let body: String = if body.chars().count() > max_chars { body.chars().take(max_chars - 1).chain(['…']).collect() } else { body.into() };
     if title.is_empty() {
-        p.text(rect.center(), Align2::CENTER_CENTER, body, FontId::proportional(13.0), bc);
+        let g = p.layout_no_wrap(body, if icon.is_some() { bold(13.5) } else { FontId::proportional(13.5) }, bc);
+        let iw = if icon.is_some() { 20.0 } else { 0.0 };
+        let x0 = r.center().x - (g.size().x + iw) / 2.0;
+        if let Some(i) = icon { icons::draw(p, i, Rect::from_center_size(Pos2::new(x0 + 7.0, r.center().y), vec2(15.0, 15.0)), c.weak.lerp_to_gamma(c.text, h)); }
+        p.galley(Pos2::new(x0 + iw, r.center().y - g.size().y / 2.0), g, bc);
     } else {
-        p.text(rect.left_top() + vec2(8.0, 5.0), Align2::LEFT_TOP, title, mono(10.5), tc);
-        p.text(rect.left_bottom() + vec2(8.0, -5.0), Align2::LEFT_BOTTOM, body, FontId::proportional(13.0), bc);
+        p.text(r.left_top() + vec2(12.0, 7.0), Align2::LEFT_TOP, title, FontId::proportional(11.5), tc);
+        p.text(r.left_bottom() + vec2(12.0, -7.0), Align2::LEFT_BOTTOM, body, FontId::proportional(14.0), bc);
+    }
+    for (i, m) in marks.iter().enumerate() {
+        icons::draw(p, *m, Rect::from_min_size(Pos2::new(r.right() - 20.0 - i as f32 * 15.0, r.top() + 7.0), vec2(12.0, 12.0)), c.acc);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Retro fader/knob for every number: hover, hold and drag up/down (or left/right) to change it,
+const SIDEBAR_ICON_X: f32 = 26.0;
+const SIDEBAR_LABEL_X: f32 = 52.0;
+const HEADER_CENTER_Y: f32 = 36.0;
+const SIDEBAR_TOP: i8 = 14;
+const TITLE_BAR_TOP: i8 = 10;
+
+/// Sidebar: a column of entries with one pill that glides to the selected entry.
+/// Returns the clicked index. `compact` shows icons only.
+fn nav_list(ui: &mut egui::Ui, id: &str, items: &[(Icon, &str)], sel: Option<usize>, compact: bool) -> Option<usize> {
+    let c = pal(ui.visuals().dark_mode);
+    let h = 48.0;
+    let w = ui.available_width();
+    // the pill is painted first, under the entries
+    let pill_layer = ui.painter().add(Shape::Noop);
+    let mut hit = None;
+    let mut selected_rect = None;
+    for (i, (icon, text)) in items.iter().enumerate() {
+        let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+        let on = sel == Some(i);
+        if on { selected_rect = Some(rect); }
+        let hv = anim(ui.ctx(), resp.id, resp.hovered() && !on, 0.12);
+        let p = ui.painter();
+        if hv > 0.0 { p.rect_filled(rect.shrink2(vec2(0.0, 2.0)), 22.0, c.hover.gamma_multiply(hv * 0.7)); }
+        let col = if on { c.text } else { c.text.gamma_multiply(0.86) };
+        let ir = if compact { Rect::from_center_size(rect.center(), vec2(24.0, 24.0)) } else { Rect::from_center_size(Pos2::new(rect.left() + SIDEBAR_ICON_X, rect.center().y), vec2(24.0, 24.0)) };
+        icons::draw(p, *icon, ir, if on { c.acc } else { col });
+        if !compact {
+            p.text(Pos2::new(rect.left() + SIDEBAR_LABEL_X, rect.center().y), Align2::LEFT_CENTER, *text, if on { bold(16.5) } else { FontId::proportional(16.5) }, col);
+        }
+        let resp = if compact { resp.on_hover_text(*text) } else { resp };
+        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { hit = Some(i) }
+    }
+    if let Some(selected) = selected_rect {
+        // Allocated rows include item spacing; use the same bounds as their icon and text.
+        let y = anim_to(ui.ctx(), (id, "pill"), selected.top(), 0.26);
+        let a = anim(ui.ctx(), (id, "pill_on"), true, 0.2);
+        let r = Rect::from_min_size(Pos2::new(selected.left(), y + 2.0), vec2(selected.width(), selected.height() - 4.0));
+        ui.painter().set(pill_layer, egui::epaint::RectShape::filled(r, 22.0, c.acc.gamma_multiply(0.16 * a)));
+    }
+    hit
+}
+
+/// Fader for every number: hover, hold and drag up/down (or left/right) to change it,
 /// Shift for fine steps; a plain click turns it into a text field to type the value
 /// (comma or dot), Enter takes it, Esc cancels.
 struct Regler<'a> { text: &'a str, suffix: &'a str, log: bool, dec: Option<usize> }
@@ -290,7 +503,7 @@ impl<'a> Regler<'a> {
 
         let w = ui.available_width().clamp(180.0, 460.0);
         let id = ui.auto_id_with(("regler", self.text)); // stable while scrolling, unlike the position
-        let (rect, _) = ui.allocate_exact_size(vec2(w, 28.0), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(vec2(w, 38.0), Sense::hover());
         let edit_id = id.with("edit");
         let enabled = ui.is_enabled();
         let mut resp = ui.interact(rect, id, if enabled { Sense::click_and_drag() } else { Sense::hover() });
@@ -327,23 +540,21 @@ impl<'a> Regler<'a> {
         }
         if resp.changed() { *v = N::from_f64(val) } // untouched values stay exactly as loaded
 
-        // look: LED segment meter with label and readout
+        // look: label, thin track with knob, value
         let p = ui.painter();
         let hot = enabled && (resp.hovered() || resp.dragged());
         let dim = |x: Color32| if enabled { x } else { x.gamma_multiply(0.45) };
-        p.rect_filled(rect, 4.0, if hot { c.hover } else { c.idle });
-        p.rect_stroke(rect, 4.0, Stroke::new(1.0, if hot { c.acc } else { c.line }), StrokeKind::Inside);
+        p.rect_filled(rect, 19.0, if hot { c.hover } else { c.idle });
         let t = to_t(val).clamp(0.0, 1.0) as f32;
-        let meter = Rect::from_min_max(Pos2::new(rect.left() + rect.width() * 0.5, rect.top() + 9.0), Pos2::new(rect.right() - 74.0, rect.bottom() - 9.0));
-        let n = ((meter.width() / 6.0) as usize).max(4);
-        let seg = meter.width() / n as f32;
-        for i in 0..n {
-            let r = Rect::from_min_size(Pos2::new(meter.left() + i as f32 * seg, meter.top()), vec2(seg - 2.0, meter.height()));
-            let lit = (i as f32 + 0.5) / n as f32 <= t;
-            p.rect_filled(r, 1.0, dim(if lit { c.acc } else { c.line }));
-        }
-        p.text(rect.left_center() + vec2(9.0, 0.0), Align2::LEFT_CENTER, self.text, FontId::proportional(13.0), dim(c.text));
-        p.text(rect.right_center() - vec2(9.0, 0.0), Align2::RIGHT_CENTER, format!("{}{}", fmt(val), self.suffix), mono(12.5), dim(if hot { c.acc } else { c.text }));
+        let track = Rect::from_min_max(Pos2::new(rect.left() + rect.width() * 0.48, rect.center().y - 2.0), Pos2::new(rect.right() - 80.0, rect.center().y + 2.0));
+        p.rect_filled(track, 2.0, dim(c.line));
+        let x = track.left() + track.width() * t;
+        p.rect_filled(Rect::from_min_max(track.min, Pos2::new(x, track.bottom())), 2.0, dim(c.acc));
+        let kr = egui::lerp(7.0..=9.0, anim(ui.ctx(), id.with("k"), hot, 0.12));
+        p.circle_filled(Pos2::new(x, track.center().y + 1.0), kr, Color32::from_black_alpha(50));
+        p.circle_filled(Pos2::new(x, track.center().y), kr, dim(Color32::WHITE));
+        p.text(rect.left_center() + vec2(16.0, 0.0), Align2::LEFT_CENTER, self.text, FontId::proportional(14.0), dim(c.text));
+        p.text(rect.right_center() - vec2(16.0, 0.0), Align2::RIGHT_CENTER, format!("{}{}", fmt(val), self.suffix), bold(13.0), dim(if hot { c.acc } else { c.weak }));
         resp.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text(tr("Drag = adjust (Shift = fine) · Click = type a number"))
     }
 }
@@ -356,7 +567,7 @@ pub fn act_text(a: Act) -> String {
         Act::Mouse(b) => tr(["", "Mouse L", "Mouse R", "Mouse M", "Mouse 4", "Mouse 5"][b.min(5) as usize]).into(),
         Act::Wheel(w) => format!("{} {}", tr("Wheel"), ["↑", "↓", "←", "→"][w.min(3) as usize]),
         Act::Move(d) => format!("{} {}", tr("Mouse"), ["", "↑", "↓", "←", "→"][d.min(4) as usize]),
-        Act::Pad(o) => format!("🎮 {}", o.label()),
+        Act::Pad(o) => format!("{} {}", tr("Pad"), o.label()),
     }
 }
 
@@ -382,15 +593,20 @@ pub fn slot_text(s: &Slot) -> String {
     }
 }
 
+/// Assignment as text, with turbo / toggle spelled out (cells show those as icons instead).
 pub fn summary(b: &Button) -> String {
+    let mut s = summary_core(b);
+    if b.turbo { s = format!("{} · {s}", tr("Turbo")) }
+    if b.toggle { s = format!("{} · {s}", tr("Toggle")) }
+    s
+}
+
+fn summary_core(b: &Button) -> String {
     if !b.action.is_empty() {
         return b.action.clone();
     }
-    let mut s = if b.slots.is_empty() { "—".to_string() } else { b.slots.iter().map(slot_text).collect::<Vec<_>>().join(" · ") };
-    if b.turbo { s = format!("⚡ {s}") }
-    if b.toggle { s = format!("⇆ {s}") }
-    if let Some((set, _)) = b.set { s = format!("{s} ▸S{}", set + 1) }
-    s
+    let s = if b.slots.is_empty() { "—".to_string() } else { b.slots.iter().map(slot_text).collect::<Vec<_>>().join(" · ") };
+    match b.set { Some((set, _)) => format!("{s} → S{}", set + 1), None => s }
 }
 
 fn stem(path: &str) -> String {
@@ -414,7 +630,7 @@ fn elem_name(p: &Set, e: Elem) -> String {
         Elem::Stick(s, d) => format!("{} {}", tr(STICK_NAMES[s as usize]), DIRS[d as usize]),
         Elem::StickMod(s) => format!("{} {}", tr(STICK_NAMES[s as usize]), tr("Modifier")),
         Elem::Trig(t, pos) => format!("{} {}", TRIG_NAMES[t as usize], if pos { "+" } else { "−" }),
-        Elem::Key(i) => p.keys.get(i as usize).map(|k| format!("⌨ {}", winio::key_name(k.vk))).unwrap_or_default(),
+        Elem::Key(i) => p.keys.get(i as usize).map(|k| winio::key_name(k.vk)).unwrap_or_default(),
     }
 }
 
@@ -475,7 +691,7 @@ fn keyboard(ui: &mut egui::Ui, sel: Option<u16>, numpad: bool) -> Option<u16> {
                     let on = sel == Some(vk);
                     let b = egui::Button::new(RichText::new(short_key(vk)).size((u * 0.36).clamp(9.0, 13.0)).color(if on { Color32::WHITE } else { ui.visuals().strong_text_color() }))
                         .fill(if on { accent(dark) } else { ui.visuals().faint_bg_color })
-                        .corner_radius(5)
+                        .corner_radius(6)
                         .truncate();
                     if ui.put(kr, b).on_hover_text(winio::key_name(vk)).clicked() { hit = Some(vk) }
                 }
@@ -498,8 +714,8 @@ fn chip(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
 /// Keyboard / mouse / virtual pad output picker.
 fn act_picker(ui: &mut egui::Ui, tab: &mut u8, sel: Option<Act>, numpad: bool) -> Option<Act> {
     ui.horizontal(|ui| {
-        for (i, l) in [("⌨", "Keyboard"), ("🖱", "Mouse"), ("🎮", "Controller")].into_iter().enumerate() {
-            ui.selectable_value(tab, i as u8, format!("{} {}", l.0, tr(l.1)));
+        for (i, l) in ["Keyboard", "Mouse", "Controller"].into_iter().enumerate() {
+            ui.selectable_value(tab, i as u8, tr(l));
         }
     });
     let mut hit = None;
@@ -545,173 +761,7 @@ fn ms_field(ui: &mut egui::Ui, label: &str, v: &mut u32, max: u32) -> bool {
 
 // ================================================================= controller drawing
 
-/// Last stick positions (normalized, y up) for the motion trail in the live view.
-pub type Trail = [std::collections::VecDeque<(f32, f32)>; 2];
-
-/// Live view: the real controller in phosphor green, padmimic's virtual pad output in amber.
-/// Sticks show dead zone and max zone of the current set plus a short motion trail.
-pub(crate) fn controller(ui: &mut egui::Ui, g: &XGamepad, out: Option<&XGamepad>, sticks: &[Stick; 2], trail: &mut Trail) {
-    let w = ui.available_width().min(400.0);
-    let h = w * 0.56;
-    let (resp, p) = ui.allocate_painter(vec2(ui.available_width(), h + 30.0), Sense::hover());
-    let o = resp.rect.min + vec2((resp.rect.width() - w) / 2.0, 4.0);
-    let at = |x: f32, y: f32| o + vec2(x * w, y * w);
-    let c = pal(ui.visuals().dark_mode);
-    let on = |b: u16| g.buttons.raw & b != 0;
-    let von = |b: u16| out.is_some_and(|v| v.buttons.raw & b != 0);
-
-    // backdrop: faint grid + scanlines (CRT feel, cheap)
-    let area = Rect::from_min_size(o - vec2(0.0, 4.0), vec2(w, h + 4.0));
-    let mut y = area.top();
-    while y < area.bottom() {
-        p.hline(area.x_range(), y, Stroke::new(1.0, c.line.gamma_multiply(0.18)));
-        y += 3.0;
-    }
-    for i in 1..12 {
-        let x = area.left() + area.width() * i as f32 / 12.0;
-        p.vline(x, area.y_range(), Stroke::new(1.0, c.line.gamma_multiply(0.12)));
-    }
-
-    // body silhouette: right half as cubic curves, mirrored; filled as a fan (the shape is star-shaped
-    // around its centre), outlined in neon
-    let right: [[(f32, f32); 4]; 4] = [
-        [(0.5, 0.135), (0.6, 0.135), (0.68, 0.115), (0.79, 0.115)],
-        [(0.79, 0.115), (0.9, 0.115), (0.93, 0.33), (0.92, 0.47)],
-        [(0.92, 0.47), (0.91, 0.56), (0.81, 0.58), (0.76, 0.52)],
-        [(0.76, 0.52), (0.71, 0.46), (0.6, 0.43), (0.5, 0.43)],
-    ];
-    let mut outline: Vec<Pos2> = vec![];
-    for seg in right.iter() {
-        let pts = seg.map(|(x, y)| at(x, y));
-        let b = egui::epaint::CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::NONE);
-        outline.extend(b.flatten(Some(0.4)));
-    }
-    let left: Vec<Pos2> = outline.iter().rev().map(|q| Pos2::new(2.0 * at(0.5, 0.0).x - q.x, q.y)).collect();
-    outline.extend(left);
-    let centre = at(0.5, 0.3);
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(centre, c.card);
-    for (i, q) in outline.iter().enumerate() {
-        mesh.colored_vertex(*q, c.idle);
-        let n = outline.len() as u32;
-        mesh.add_triangle(0, 1 + i as u32, 1 + (i as u32 + 1) % n);
-    }
-    p.add(egui::Shape::mesh(mesh));
-    p.add(egui::Shape::closed_line(outline.clone(), Stroke::new(5.0, c.acc.gamma_multiply(0.08))));
-    p.add(egui::Shape::closed_line(outline, Stroke::new(1.5, c.acc.gamma_multiply(0.75))));
-
-    let label = |pos: Pos2, s: &str, size: f32, col: Color32| { p.text(pos, Align2::CENTER_CENTER, s, mono(size * w), col); };
-
-    // triggers: vertical meters outside the body, real (green) + virtual output (amber)
-    for (x, v, vo, name) in [(0.035, g.left_trigger, out.map(|o| o.left_trigger), "LT"), (0.965, g.right_trigger, out.map(|o| o.right_trigger), "RT")] {
-        let r = Rect::from_center_size(at(x, 0.3), vec2(0.03 * w, 0.34 * w));
-        p.rect_filled(r, 2.0, c.idle);
-        p.rect_stroke(r, 2.0, Stroke::new(1.0, c.line), StrokeKind::Inside);
-        let fill = |val: u8, rr: Rect, col: Color32| {
-            let top = rr.bottom() - rr.height() * val as f32 / 255.0;
-            p.rect_filled(Rect::from_min_max(Pos2::new(rr.left(), top), rr.max), 2.0, col);
-        };
-        fill(v, r.shrink(2.0), c.acc);
-        if v > 30 { glow(&p, r, 2.0, c.acc) }
-        if let Some(vo) = vo {
-            let side = Rect::from_min_size(Pos2::new(if x < 0.5 { r.right() + 3.0 } else { r.left() - 7.0 }, r.top()), vec2(4.0, r.height()));
-            p.rect_filled(side, 1.0, c.idle);
-            fill(vo, side, c.amber);
-        }
-        label(r.center_top() - vec2(0.0, 0.025 * w), name, 0.026, if v > 30 { c.acc } else { c.weak });
-        label(r.center_bottom() + vec2(0.0, 0.025 * w), &format!("{v:03}"), 0.024, c.text);
-    }
-
-    // bumpers
-    for (x0, b, name) in [(0.2, XButtons::LB, "LB"), (0.64, XButtons::RB, "RB")] {
-        let r = Rect::from_min_size(at(x0, 0.07), vec2(0.16 * w, 0.04 * w));
-        let lit = on(b);
-        if lit { glow(&p, r, 6.0, c.acc) }
-        p.rect_filled(r, 6.0, if lit { c.acc.gamma_multiply(0.35) } else { c.idle });
-        p.rect_stroke(r, 6.0, Stroke::new(1.2, if lit { c.acc } else if von(b) { c.amber } else { c.line }), StrokeKind::Inside);
-        label(r.center(), name, 0.024, if lit { c.acc } else { c.weak });
-    }
-
-    // sticks: well, max zone, dead zone, crosshair, trail, cap
-    for (si, (cx, cy), x, y, click, vxy) in [
-        (0usize, (0.3, 0.25), g.thumb_lx, g.thumb_ly, on(XButtons::LTHUMB), out.map(|o| (o.thumb_lx, o.thumb_ly))),
-        (1, (0.62, 0.36), g.thumb_rx, g.thumb_ry, on(XButtons::RTHUMB), out.map(|o| (o.thumb_rx, o.thumb_ry))),
-    ] {
-        let ctr = at(cx, cy);
-        let r = 0.075 * w;
-        let s = &sticks[si];
-        p.circle_filled(ctr, r, c.card);
-        p.circle_stroke(ctr, r, Stroke::new(1.0, c.line));
-        p.circle_stroke(ctr, r * (s.max as f32 / 32767.0).min(1.0), Stroke::new(1.0, c.weak.gamma_multiply(0.5)));
-        p.circle_filled(ctr, r * s.dead as f32 / 32767.0, c.line.gamma_multiply(0.5));
-        p.hline((ctr.x - r)..=(ctr.x + r), ctr.y, Stroke::new(1.0, c.line.gamma_multiply(0.6)));
-        p.vline(ctr.x, (ctr.y - r)..=(ctr.y + r), Stroke::new(1.0, c.line.gamma_multiply(0.6)));
-        let n = (x as f32 / 32767.0, y as f32 / 32767.0);
-        let t = &mut trail[si];
-        if t.front() != Some(&n) { t.push_front(n) }
-        t.truncate(18);
-        let pos = |q: &(f32, f32)| ctr + vec2(q.0, -q.1) * r;
-        for (i, win) in t.iter().collect::<Vec<_>>().windows(2).enumerate() {
-            let a = 1.0 - i as f32 / 18.0;
-            p.line_segment([pos(win[0]), pos(win[1])], Stroke::new(2.0 * a, c.acc.gamma_multiply(0.5 * a)));
-        }
-        if let Some((vx, vy)) = vxy.filter(|v| *v != (0, 0)) {
-            p.circle_stroke(pos(&(vx as f32 / 32767.0, vy as f32 / 32767.0)), r * 0.2, Stroke::new(1.5, c.amber));
-        }
-        let live = eval_stick(s, x as i32, y as i32).safe;
-        let cap = pos(&n);
-        if live || click { glow_circle(&p, cap, r * 0.22, c.acc) }
-        p.circle_filled(cap, r * 0.22, if click { c.acc } else if live { c.acc.gamma_multiply(0.55) } else { c.weak.gamma_multiply(0.6) });
-        p.circle_stroke(cap, r * 0.22, Stroke::new(1.2, c.acc));
-    }
-
-    // d-pad
-    let dp = at(0.4, 0.37);
-    let a = 0.028 * w;
-    for (dx, dy, b) in [(0.0, -1.0, XButtons::UP), (0.0, 1.0, XButtons::DOWN), (-1.0, 0.0, XButtons::LEFT), (1.0, 0.0, XButtons::RIGHT)] {
-        let r = Rect::from_center_size(dp + vec2(dx, dy) * a, vec2(a, a));
-        let lit = on(b);
-        if lit { glow(&p, r, 2.0, c.acc) }
-        p.rect_filled(r, 2.0, if lit { c.acc } else { c.card });
-        p.rect_stroke(r, 2.0, Stroke::new(1.0, if von(b) { c.amber } else { c.line }), StrokeKind::Inside);
-    }
-    p.rect_filled(Rect::from_center_size(dp, vec2(a, a)), 0.0, c.card);
-
-    // face buttons
-    let f = 0.042 * w;
-    for (dx, dy, b, l, col) in [
-        (0.0, 1.0, XButtons::A, "A", Color32::from_rgb(70, 220, 120)),
-        (1.0, 0.0, XButtons::B, "B", Color32::from_rgb(255, 90, 80)),
-        (-1.0, 0.0, XButtons::X, "X", Color32::from_rgb(70, 150, 255)),
-        (0.0, -1.0, XButtons::Y, "Y", Color32::from_rgb(255, 210, 60)),
-    ] {
-        let ctr = at(0.71, 0.24) + vec2(dx, dy) * f;
-        let r = 0.022 * w;
-        let lit = on(b);
-        if lit { glow_circle(&p, ctr, r, col) }
-        p.circle_filled(ctr, r, if lit { col } else { c.card });
-        p.circle_stroke(ctr, r, Stroke::new(1.5, if von(b) { c.amber } else { col.gamma_multiply(0.8) }));
-        label(ctr, l, 0.024, if lit { Color32::BLACK } else { col });
-    }
-
-    // back / start / guide
-    for (x, y, r, b) in [(0.445, 0.24, 0.013, XButtons::BACK), (0.555, 0.24, 0.013, XButtons::START), (0.5, 0.18, 0.022, XButtons::GUIDE)] {
-        let ctr = at(x, y);
-        let lit = on(b);
-        if lit { glow_circle(&p, ctr, r * w, c.acc) }
-        p.circle_filled(ctr, r * w, if lit { c.acc } else { c.card });
-        p.circle_stroke(ctr, r * w, Stroke::new(1.0, if von(b) { c.amber } else { c.line }));
-    }
-
-    // readout strip
-    let stick_txt = |x: i16, y: i16| format!("{:+.2} {:+.2}", x as f32 / 32767.0, y as f32 / 32767.0);
-    let line = format!("LS {}   RS {}   LT {:03}  RT {:03}", stick_txt(g.thumb_lx, g.thumb_ly), stick_txt(g.thumb_rx, g.thumb_ry), g.left_trigger, g.right_trigger);
-    p.text(Pos2::new(resp.rect.center().x, resp.rect.bottom() - 12.0), Align2::CENTER_CENTER, line, mono(12.0), c.weak);
-    if out.is_some() {
-        p.text(o + vec2(w, 2.0), Align2::RIGHT_TOP, format!("■ {}", tr("virtual")), mono(11.0), c.amber);
-    }
-    p.text(o + vec2(0.0, 2.0), Align2::LEFT_TOP, format!("■ {}", tr("real")), mono(11.0), c.acc); // legend in the top corners, clear of the readout
-}
+pub(crate) use crate::pad::{Trail, controller};
 
 /// JoyControlStickStatusBox: zones, diagonal sectors and the live position.
 fn stick_status(ui: &mut egui::Ui, s: &Stick, x: i16, y: i16) {
@@ -762,7 +812,6 @@ enum Dlg {
     Names,
     Pref,
     QuickSet(Vec<Elem>),
-    Settings,
     SaveAs(String),
     Reset,
     About,
@@ -774,7 +823,7 @@ enum Dlg {
 enum Cap { Assign(Elem, Option<usize>), KeyBind(usize), Toggle }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Tab { Controller, Kbm }
+enum Tab { Controller, Kbm, Custom, Settings }
 
 pub struct App {
     s: Arc<Shared>,
@@ -802,6 +851,32 @@ pub struct App {
     upd: Arc<std::sync::Mutex<Upd>>,
     lang_more: bool,
     vigem_msg: Arc<std::sync::Mutex<Option<String>>>, // Some while installing, then the result
+    // ---- look & motion
+    brand_started: Option<Instant>,
+    brand_hover: bool,            // pointer over the logo last frame
+    launched: Option<Instant>,    // first frame, for the start screen
+    normal: Option<Rect>,         // last window rect while not maximized
+    page_t: Instant,             // last page change, for the page transition
+    prev_tab: Tab,                // where "Settings" goes back to
+    dlg_t: Vec<Instant>,          // when each open sheet appeared
+    settings_open: bool,          // settings window beside the main window
+    side_right: bool,
+    dock_desktop: crate::docking::Desktop,
+    side_applied: bool,           // material + corners set on the settings window
+    set_detail: bool,             // narrow settings: a page is pushed over the list
+    look_sent: Option<(u8, u8, u8, u32, bool, u8)>,
+    material_ok: bool,            // Mica / Acrylic worked (Windows 11)
+    show_settings: bool,          // dev hook: open settings on the first frame
+    restore: Option<Rect>,        // own maximize: the window rect to go back to
+    // ---- customization
+    skins: Vec<crate::skin::Skin>,
+    skin_errs: Vec<String>,
+    skins_loaded: bool,
+    cust_filter: u8,
+    cust_search: String,
+    frame_pacer: FramePacer,
+    controller_overlay: crate::overlay::Window,
+    taskbar_icon_applied: bool,
 }
 
 impl App {
@@ -829,6 +904,9 @@ impl App {
             profiles: vec![], tab: Tab::Controller, dlgs: vec![], cap: None, pick_tab: 0, adv_page: 0, adv_sel: 0, set_page: 0,
             epp_prev, auto_t: Instant::now(), auto_last: String::new(), toast: None, show_live: true, trail: Default::default(), lang_prompt, lang_more: false, upd: Arc::default(),
             vigem_msg: Arc::default(),
+            brand_started: None, brand_hover: false, launched: None, normal: None, page_t: Instant::now(), prev_tab: Tab::Controller, dlg_t: vec![], settings_open: false, side_right: true, dock_desktop: crate::docking::Desktop::default(), side_applied: false,
+            set_detail: false, look_sent: None, material_ok: true, show_settings: false, restore: None,
+            skins: vec![], skin_errs: vec![], skins_loaded: false, cust_filter: 0, cust_search: String::new(), frame_pacer: FramePacer::default(), controller_overlay: crate::overlay::Window::default(), taskbar_icon_applied: false,
         };
         app.scan_profiles();
         update::cleanup();
@@ -836,8 +914,12 @@ impl App {
         // dev hook for screenshots: PADMIMIC_SHOW=settings,languages,mouse,stick,latency,lang opens those at start
         for d in std::env::var("PADMIMIC_SHOW").unwrap_or_default().split(',') {
             match d {
-                "settings" => app.open(Dlg::Settings),
-                "languages" => { app.set_page = 1; app.open(Dlg::Settings) }
+                "settings" => app.show_settings = true,
+                "appearance" => { app.set_detail = true; app.show_settings = true }
+                "page" => { app.tab = Tab::Settings; app.set_detail = true }
+                "languages" => { app.set_page = 2; app.set_detail = true; app.show_settings = true }
+                "kbm" => app.tab = Tab::Kbm,
+                "custom" => app.tab = Tab::Custom,
                 "mouse" => app.open(Dlg::Mouse(MouseTarget::DPad)),
                 "latency" => app.open(Dlg::Latency),
                 "stick" => app.open(Dlg::Stick(0)),
@@ -888,7 +970,18 @@ impl App {
     }
 
     fn open(&mut self, d: Dlg) {
-        if !self.dlgs.contains(&d) { self.dlgs.push(d) }
+        if !self.dlgs.contains(&d) {
+            self.dlgs.push(d);
+            self.dlg_t.push(Instant::now());
+        }
+    }
+
+    fn go(&mut self, t: Tab) {
+        if self.tab != t {
+            if t == Tab::Settings && self.tab != Tab::Settings { self.prev_tab = self.tab }
+            self.tab = t;
+            self.page_t = Instant::now();
+        }
     }
 
     fn toast(&mut self, t: impl Into<String>) {
@@ -972,71 +1065,282 @@ impl App {
 
     // ------------------------------------------------------------- main window parts
 
-    fn header(&mut self, ui: &mut egui::Ui) {
-        let on = self.s.on.load(Relaxed);
-        // own title bar (the window has no Windows frame): empty space drags, double click maximizes.
-        // Registered before the widgets, so buttons on top still get their clicks.
-        let row = Rect::from_min_size(ui.cursor().min - vec2(14.0, 10.0), vec2(ui.available_width() + 28.0, 44.0));
+    fn page_title(&self) -> &'static str {
+        match self.tab { Tab::Controller => tr("Controller"), Tab::Kbm => tr("Keyboard & mouse"), Tab::Custom => tr("Customization"), Tab::Settings => tr("Settings") }
+    }
+
+    /// Header of the content column: page title, save, live view, window buttons.
+    /// The window has no Windows frame: empty space drags, double click maximizes. The drag area is
+    /// registered before the widgets, so buttons on top still get their clicks.
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let row = Rect::from_min_size(ui.cursor().min - vec2(22.0, 10.0), vec2(ui.available_width() + 30.0, 58.0));
         let bar = ui.interact(row, ui.id().with("titlebar"), Sense::click_and_drag());
-        let maxed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+        let ctx = ui.ctx().clone();
+        let maxed = self.restore.is_some();
         if bar.double_clicked() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maxed));
+            self.toggle_max(&ctx);
         } else if bar.drag_started_by(egui::PointerButton::Primary) {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            // dragging a maximized window: back to its old size, under the cursor at the same spot
+            if let (Some(old), Some(outer), Some(at)) = (self.restore.take(), ctx.input(|i| i.viewport().outer_rect), ctx.input(|i| i.pointer.press_origin())) {
+                let fx = (at.x - outer.left()) / outer.width().max(1.0);
+                let screen = outer.min + at.to_vec2();
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(old.size()));
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(screen.x - fx * old.width(), screen.y - at.y)));
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
+        let c = pal(ui.visuals().dark_mode);
         ui.horizontal(|ui| {
-            let c = pal(ui.visuals().dark_mode);
-            // blinking block cursor after the name, like an old terminal prompt
-            let blink = (ui.input(|i| i.time) * 1.6) as i64 % 2 == 0;
-            ui.label(RichText::new(format!("PADMIMIC{}", if blink { "█" } else { " " })).font(mono(20.0)).color(c.acc));
-            ui.menu_button(tr("Options"), |ui| {
-                if ui.button(tr("Settings…")).clicked() { self.open(Dlg::Settings); ui.close() }
-                if ui.button(tr("Latency meter…")).clicked() { self.open(Dlg::Latency); ui.close() }
-            });
-            ui.menu_button(tr("Help"), |ui| {
-                if ui.button(tr("About padmimic")).clicked() { self.open(Dlg::About); ui.close() }
-            });
+            ui.set_min_height(2.0 * (HEADER_CENTER_Y - f32::from(TITLE_BAR_TOP)));
+            ui.label(RichText::new(self.page_title()).font(bold(22.0)).color(c.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let ctx = ui.ctx().clone();
+                ui.spacing_mut().item_spacing.x = 2.0;
                 if win_btn(ui, WinBtn::Close) { ctx.send_viewport_cmd(egui::ViewportCommand::Close) }
-                if win_btn(ui, if maxed { WinBtn::Restore } else { WinBtn::Max }) { ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maxed)) }
+                if win_btn(ui, if maxed { WinBtn::Restore } else { WinBtn::Max }) { self.toggle_max(&ctx) }
                 if win_btn(ui, WinBtn::Min) { ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)) }
-                ui.add_space(10.0);
-                if switch(ui, on) { self.s.on.store(!on, Relaxed) }
-                let avail = match &*self.upd.lock().unwrap() { Upd::Available(r) => Some(r.version.clone()), _ => None };
-                if let Some(v) = avail {
-                    let c = pal(ui.visuals().dark_mode);
-                    let b = egui::Button::new(RichText::new(format!("⬆ {} v{v}", tr("Update"))).font(mono(12.5)).color(Color32::BLACK)).fill(c.amber);
-                    if ui.add(b).clicked() { self.open(Dlg::Update) }
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.add_space(12.0);
+                if self.tab == Tab::Controller {
+                    if switch(ui, self.show_live) { self.show_live = !self.show_live }
+                    ui.label(RichText::new(tr("Live view")).color(c.weak));
+                    ui.add_space(6.0);
+                }
+                // the save pill only exists while there is something to save; it fades and slides in
+                let dirty = self.p != self.saved;
+                let a = ease(anim(&ctx, "save_pill", dirty, 0.25));
+                if a > 0.01 {
+                    ui.add_space((1.0 - a) * 16.0);
+                    ui.scope(|ui| {
+                        ui.set_opacity(a);
+                        if pill(ui, tr("Save"), true).clicked() && dirty { self.save() }
+                    });
                 }
             });
         });
     }
 
-    fn profile_bar(&mut self, ui: &mut egui::Ui) {
+    /// Maximize to the monitor's work area ourselves: with Windows' maximized flag a frameless
+    /// window loses Mica / Acrylic and the whole UI turns solid.
+    fn toggle_max(&mut self, ctx: &egui::Context) {
+        if let Some(r) = self.restore.take() {
+            self.look_sent = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(r.size()));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(r.min));
+            return;
+        }
+        let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else { return };
+        let ppp = ctx.pixels_per_point();
+        let (l, t, r, b) = winio::work_area((outer.center().x * ppp) as i32, (outer.center().y * ppp) as i32);
+        let wa = Rect::from_min_max(Pos2::new(l as f32, t as f32) / ppp, Pos2::new(r as f32, b as f32) / ppp);
+        self.restore = Some(self.normal.unwrap_or(outer));
+        self.look_sent = None; // re-apply the material after the size jump
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(wa.min));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(wa.size()));
+    }
+
+    fn save(&mut self) {
+        if self.path.is_empty() { self.open(Dlg::SaveAs(String::new())) } else { let p = self.path.clone(); self.save_to(p) }
+    }
+
+    /// Left column, timeline style: logo, pages, the big power pill, sets, the profile at the bottom.
+    /// `compact` (narrow window) keeps only icons.
+    fn sidebar(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let c = pal(ui.visuals().dark_mode);
+        let ctx = ui.ctx().clone();
+        let drag = ui.interact(Rect::from_min_size(ui.max_rect().min - vec2(12.0, 14.0), vec2(ui.available_width() + 24.0, 62.0)), ui.id().with("sidedrag"), Sense::click_and_drag());
+        if drag.drag_started_by(egui::PointerButton::Primary) { ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag) }
+
+        let height = 2.0 * (HEADER_CENTER_Y - f32::from(SIDEBAR_TOP));
+        let (r, logo) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+        // the start screen draws the mark; hovering it here draws it again
+        let hover = logo.contains_pointer();
+        let idle = self.brand_started.is_none_or(|s| s.elapsed().as_secs_f32() >= crate::brand::DRAW_SECONDS);
+        if hover && !self.brand_hover && idle && motion() { self.brand_started = Some(Instant::now()) }
+        self.brand_hover = hover;
+        let draw = self.brand_started.map_or(crate::brand::DRAW_SECONDS, |s| s.elapsed().as_secs_f32());
+        if draw < crate::brand::DRAW_SECONDS { ctx.request_repaint() }
+        let center = Pos2::new(if compact { r.center().x } else { r.left() + SIDEBAR_ICON_X }, r.center().y);
+        crate::brand::mark(ui.painter(), center, 0.94, c.text, draw);
+        ui.add_space(64.0 - height);
+
+        let items = [(Icon::Pad, tr("Controller")), (Icon::Keyboard, tr("Keyboard & mouse")), (Icon::Palette, tr("Customization")), (Icon::Gear, tr("Settings")), (Icon::Gauge, tr("Latency meter")), (Icon::Info, tr("About padmimic"))];
+        let sel = if self.settings_open || self.tab == Tab::Settings { Some(3) } else { Some(match self.tab { Tab::Kbm => 1, Tab::Custom => 2, _ => 0 }) };
+        match nav_list(ui, "nav", &items, sel, compact) {
+            Some(0) => { self.settings_open = false; self.go(Tab::Controller) }
+            Some(1) => { self.settings_open = false; self.go(Tab::Kbm) }
+            Some(2) => { self.settings_open = false; self.go(Tab::Custom) }
+            Some(3) => self.toggle_settings(&ctx),
+            Some(4) => self.open(Dlg::Latency),
+            Some(_) => self.open(Dlg::About),
+            None => {}
+        }
+        ui.add_space(14.0);
+        self.power(ui, compact);
+        ui.add_space(20.0);
+        self.sets(ui, compact);
+
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            self.profile_switcher(ui, compact);
+            ui.add_space(8.0);
+            if compact { return }
+            let avail = match &*self.upd.lock().unwrap() { Upd::Available(r) => Some(r.version.clone()), _ => None };
+            if let Some(v) = avail {
+                if banner(ui, Icon::Up, &format!("{} v{v}", tr("Update")), c.amber).clicked() { self.open(Dlg::Update) }
+            }
+            let (status, vigem) = { let l = self.s.live.lock().unwrap(); (l.status.clone(), l.vigem) };
+            if !vigem && status == engine::VIGEM_MISSING {
+                let msg = self.vigem_msg.lock().unwrap().clone();
+                let busy = msg.as_deref() == Some(INSTALLING);
+                if let Some(m) = msg.clone().filter(|m| m != INSTALLING) { ui.label(RichText::new(tr(&m)).size(11.5).color(c.weak)); }
+                let b = banner(ui, Icon::Pad, tr(if busy { INSTALLING } else { "Install ViGEmBus" }), c.acc)
+                    .on_hover_text(tr("Driver for the virtual Xbox controller (by Nefarius, signed). Windows asks once for admin rights. padmimic connects by itself afterwards."));
+                if b.clicked() && !busy {
+                    let m = self.vigem_msg.clone();
+                    *m.lock().unwrap() = Some(INSTALLING.into());
+                    std::thread::spawn(move || {
+                        let r = match winio::install_vigem() {
+                            Ok(false) => "ViGEmBus installed – connecting in a few seconds".into(),
+                            Ok(true) => "ViGEmBus installed – please restart Windows".into(),
+                            Err(e) => e,
+                        };
+                        *m.lock().unwrap() = Some(r);
+                    });
+                }
+            }
+        });
+    }
+
+    /// A compact toggle with a single edge highlight as the state changes.
+    fn power(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let c = pal(ui.visuals().dark_mode);
+        let ctx = ui.ctx().clone();
+        let on = self.s.on.load(Relaxed);
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
+        let t = anim(&ctx, resp.id.with("state"), on, 0.23);
+        let hover = anim(&ctx, resp.id, resp.hovered(), 0.12);
+        let p = ui.painter();
+        let edge = c.line.lerp_to_gamma(c.acc, 0.43 * t);
+        let fill = c.idle.lerp_to_gamma(c.hover, 0.55 * hover);
+        let flash = (4.0 * t * (1.0 - t)).clamp(0.0, 1.0);
+        if flash > 0.0 {
+            for (spread, intensity) in [(3.0, 0.09), (1.5, 0.20), (0.5, 0.37)] {
+                p.rect_stroke(rect.expand(spread), 12.0 + spread, Stroke::new(1.0, c.acc.gamma_multiply(flash * intensity)), StrokeKind::Inside);
+            }
+        }
+        p.rect_filled(rect, 12.0, fill);
+        p.rect_stroke(rect, 12.0, Stroke::new(1.0, edge), StrokeKind::Inside);
+
+        let track_center = if compact { rect.center() } else { Pos2::new(rect.right() - 29.0, rect.center().y) };
+        let track = Rect::from_center_size(track_center, vec2(38.0, 22.0));
+        p.rect_filled(track, 11.0, c.hover.lerp_to_gamma(c.acc, t));
+        p.rect_stroke(track, 11.0, Stroke::new(1.0, c.line.lerp_to_gamma(c.acc, t)), StrokeKind::Inside);
+        let thumb = track_center + vec2(egui::lerp(-8.0..=8.0, t), 0.0);
+        p.circle_filled(thumb, 7.0, c.weak.lerp_to_gamma(Color32::WHITE, t));
+
+        let key = match self.st.toggle { Input::Key(k) => winio::key_name(k), Input::Pad(o) => format!("{} {}", tr("Pad"), o.label()) };
+        let label = tr(if on { "ON" } else { "OFF" });
+        if !compact {
+            let state = p.text(rect.left_center() + vec2(12.0, 0.0), Align2::LEFT_CENTER, label, bold(13.0), c.text);
+            let key = p.layout_no_wrap(key.clone(), mono(11.0), c.weak);
+            let x = state.right() + 11.0;
+            if x + key.size().x < track.left() - 7.0 {
+                p.galley(Pos2::new(x, rect.center().y - key.size().y / 2.0), key, c.weak);
+            }
+        }
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let resp = if compact { resp.on_hover_text(format!("{label} · {key}")) } else { resp };
+        if resp.clicked() {
+            self.s.on.store(!on, Relaxed);
+            ctx.request_repaint();
+        }
+    }
+
+    /// Sets 1–8 as chips with one highlight that glides to the active set; the menu holds the set tools.
+    fn sets(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let c = pal(ui.visuals().dark_mode);
+        let cur = self.cur();
         ui.horizontal(|ui| {
-            let dirty = self.p != self.saved;
-            let name = if self.path.is_empty() { format!("<{}>", tr("New")) } else { stem(&self.path) };
-            let mut pick: Option<String> = None;
-            egui::ComboBox::from_id_salt("profile").width(170.0).selected_text(format!("{name}{}", if dirty { " •" } else { "" })).show_ui(ui, |ui| {
-                if ui.selectable_label(self.path.is_empty(), format!("<{}>", tr("New"))).clicked() { pick = Some(String::new()) }
+            if !compact { ui.label(RichText::new(tr("Sets")).font(bold(14.0)).color(c.weak)); }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let m = icon_btn(ui, Icon::More, 28.0);
+                egui::Popup::menu(&m).width(190.0).show(|ui| {
+                    if ui.button(tr("Quick set")).clicked() {
+                        let held = self.s.live.lock().unwrap().active.clone();
+                        self.open(Dlg::QuickSet(held));
+                    }
+                    if ui.button(tr("Names")).clicked() { self.open(Dlg::Names) }
+                    if ui.button(tr("Reset")).clicked() { self.open(Dlg::Reset) }
+                });
+            });
+        });
+        let cols = if compact { 1 } else { 4 };
+        let gap = 6.0;
+        let w = ((ui.available_width() - (cols - 1) as f32 * gap) / cols as f32).floor();
+        let hgt = 36.0;
+        let rows = 8 / cols;
+        let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), rows as f32 * (hgt + gap) - gap), Sense::hover());
+        let at = |i: usize| Rect::from_min_size(area.min + vec2((i % cols) as f32 * (w + gap), (i / cols) as f32 * (hgt + gap)), vec2(w, hgt));
+        let p = ui.painter().clone();
+        let mut hover = vec![0.0; 8];
+        let mut hit = None;
+        for i in 0..8 {
+            let resp = ui.interact(at(i), ui.id().with(("set", i)), Sense::click());
+            hover[i] = anim(ui.ctx(), resp.id, resp.hovered(), 0.12);
+            let name = &self.p.set_names[i];
+            let hint = if name.is_empty() { format!("{} {}", tr("Set"), i + 1) } else { name.clone() };
+            if resp.on_hover_text(hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { hit = Some(i) }
+        }
+        for i in 0..8 { p.rect_filled(at(i), 18.0, c.idle.lerp_to_gamma(c.hover, hover[i])); }
+        let x = anim_to(ui.ctx(), "set_x", at(cur).left(), 0.28);
+        let y = anim_to(ui.ctx(), "set_y", at(cur).top(), 0.28);
+        p.rect_filled(Rect::from_min_size(Pos2::new(x, y), vec2(w, hgt)), 18.0, c.acc);
+        for i in 0..8 {
+            let r = at(i);
+            // text is white where the highlight covers the chip
+            let cover = (1.0 - ((r.left() - x).abs() / w).min(1.0)) * (1.0 - ((r.top() - y).abs() / hgt).min(1.0));
+            p.text(r.center(), Align2::CENTER_CENTER, format!("{}", i + 1), bold(14.0), c.text.lerp_to_gamma(Color32::WHITE, cover));
+        }
+        if let Some(i) = hit { *self.s.set_cmd.lock().unwrap() = Some(i) }
+    }
+
+    /// Profile at the bottom, like an account switcher: avatar, name, menu with every profile action.
+    fn profile_switcher(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let c = pal(ui.visuals().dark_mode);
+        let dirty = self.p != self.saved;
+        let name = if self.path.is_empty() { tr("New").to_string() } else { stem(&self.path) };
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 62.0), Sense::click());
+        let h = anim(ui.ctx(), resp.id, resp.hovered(), 0.12);
+        let p = ui.painter();
+        if h > 0.0 { p.rect_filled(rect, 31.0, c.hover.gamma_multiply(h * 0.7)); }
+        let av = Pos2::new(if compact { rect.center().x } else { rect.left() + 31.0 }, rect.center().y);
+        p.circle_filled(av, 20.0, c.acc);
+        let initial: String = name.chars().next().map(|ch| ch.to_uppercase().collect()).unwrap_or_default();
+        p.text(av, Align2::CENTER_CENTER, initial, bold(17.0), Color32::WHITE);
+        if dirty { p.circle_filled(av + vec2(14.0, -14.0), 5.5, c.amber); p.circle_stroke(av + vec2(14.0, -14.0), 5.5, Stroke::new(2.0, c.side.to_opaque())); }
+        if !compact {
+            let max_w = rect.width() - 110.0;
+            let g = p.layout(name.clone(), bold(15.0), c.text, max_w);
+            p.galley(Pos2::new(av.x + 30.0, rect.center().y - 19.0), g, c.text);
+            p.text(Pos2::new(av.x + 30.0, rect.center().y + 10.0), Align2::LEFT_CENTER, tr("Profile"), FontId::proportional(13.0), c.weak);
+            icons::draw(p, Icon::More, Rect::from_center_size(Pos2::new(rect.right() - 24.0, rect.center().y), vec2(18.0, 18.0)), c.text);
+        }
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let mut pick: Option<String> = None;
+        egui::Popup::menu(&resp).width(260.0).show(|ui| {
+            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                 for p in &self.profiles {
                     if ui.selectable_label(*p == self.path, stem(p)).clicked() { pick = Some(p.clone()) }
                 }
             });
-            match pick {
-                Some(p) if p.is_empty() => { self.p = Profile::default(); self.saved = self.p.clone(); self.path.clear() }
-                Some(p) => self.load(&p),
-                None => {}
-            }
+            ui.separator();
+            if ui.button(format!("+  {}", tr("New"))).clicked() { pick = Some(String::new()) }
+            if ui.button(tr("Save")).clicked() { self.save() }
+            if ui.button(tr("Save as")).clicked() { self.open(Dlg::SaveAs(stem(&self.path))) }
             if ui.button(tr("Load")).on_hover_text(tr("Load the profile from disk again")).clicked() && !self.path.is_empty() {
                 let p = self.path.clone();
                 self.load(&p);
             }
-            if ui.button(tr("Save")).clicked() {
-                if self.path.is_empty() { self.open(Dlg::SaveAs(String::new())) } else { let p = self.path.clone(); self.save_to(p) }
-            }
-            if ui.button(tr("Save as")).clicked() { self.open(Dlg::SaveAs(stem(&self.path))) }
+            if ui.button(tr("Profile settings")).clicked() { self.open(Dlg::Pref) }
             if ui.button(tr("Remove")).on_hover_text(tr("Remove from the list (the file stays)")).clicked() && !self.path.is_empty() {
                 let p = self.path.clone();
                 self.st.recent.retain(|r| *r != p);
@@ -1044,6 +1348,230 @@ impl App {
                 self.path.clear();
             }
         });
+        match pick {
+            Some(p) if p.is_empty() => { self.p = Profile::default(); self.saved = self.p.clone(); self.path.clear() }
+            Some(p) => self.load(&p),
+            None => {}
+        }
+    }
+
+    // ------------------------------------------------------------- settings: beside the window or inside
+
+    /// Prefer the right side, considering all usable connected monitors when enabled.
+    fn settings_beside(&mut self, ctx: &egui::Context) -> Option<bool> {
+        if self.st.dock == 1 { return None }
+        let (maxed, outer) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false), i.viewport().outer_rect));
+        let outer = outer.filter(|_| !maxed)?;
+        self.dock_desktop.settings_side(outer, ctx.pixels_per_point(), self.st.smart_docking, SIDE_W, SIDE_GAP)
+    }
+
+    fn toggle_settings(&mut self, ctx: &egui::Context) {
+        if self.tab == Tab::Settings { let t = self.prev_tab; self.go(t); return }
+        if self.settings_open { self.settings_open = false; return }
+        match self.settings_beside(ctx) {
+            Some(right) => { self.side_right = right; self.settings_open = true; self.side_applied = false }
+            None => self.go(Tab::Settings),
+        }
+    }
+
+    /// Animate the content of a fixed-size surface: avoid reallocating the native swapchain every frame.
+    fn settings_side(&mut self, ctx: &egui::Context) {
+        let mut desired_right = self.side_right;
+        if self.settings_open {
+            match self.settings_beside(ctx) {
+                Some(right) => desired_right = right,
+                None => { self.settings_open = false; self.go(Tab::Settings); }
+            }
+        }
+        if ctx.input(|i| i.viewport().minimized.unwrap_or(false)) { self.settings_open = false }
+        // Finish the fade-out on one side before revealing the panel on the other.
+        let switching = self.settings_open && desired_right != self.side_right;
+        let t = anim(ctx, "side", self.settings_open && !switching, 0.27);
+        if t <= 0.0 {
+            self.side_applied = false;
+            if switching { self.side_right = desired_right; ctx.request_repaint(); }
+            return;
+        }
+        if t < 1.0 { ctx.request_repaint(); }
+        let e = t * t * (3.0 - 2.0 * t);
+        let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else { return };
+        let x = if self.side_right { outer.right() + SIDE_GAP } else { outer.left() - SIDE_GAP - SIDE_W };
+        let mut open = self.settings_open;
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("settings"),
+            egui::ViewportBuilder::default().with_title(SETTINGS_TITLE).with_decorations(false).with_transparent(true).with_taskbar(false)
+                .with_has_shadow(false).with_resizable(false).with_position(Pos2::new(x, outer.top())).with_inner_size([SIDE_W, outer.height()]),
+            |vui, _| {
+                let vctx = vui.ctx().clone();
+                if !self.side_applied && winio::own_window(SETTINGS_TITLE).is_some() {
+                    winio::round_corners(SETTINGS_TITLE);
+                    // same Mica / Acrylic as the main window, so both look alike over any background
+                    winio::set_backdrop(SETTINGS_TITLE, self.material_kind(), vctx.theme() == Theme::Dark);
+                    self.side_applied = true;
+                }
+                let c = pal(vctx.theme() == Theme::Dark);
+                let full = vctx.content_rect();
+                // plain fade in / out, nothing slides
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(vui, |ui| {
+                    ui.set_opacity(e);
+                    ui.painter().rect_filled(full, 18., c.side);
+                    if self.aurora_on() { aurora(ui.painter(), full, vctx.input(|i| i.time) as f32, c.acc, vctx.theme() == Theme::Dark) }
+                    let inner = Rect::from_min_max(full.min + vec2(20., 16.), full.max + vec2(-20., -16.));
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(inner).id_salt("side"), |ui| {
+                        ui.scope(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.set_min_height(36.0);
+                                ui.label(RichText::new(tr("Settings")).font(bold(22.0)));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if icon_btn(ui, Icon::Close, 34.0).clicked() { open = false }
+                                });
+                            });
+                            ui.add_space(8.0);
+                            self.settings_view(ui, true);
+                        });
+                    });
+                });
+                if vctx.input(|i| i.key_pressed(egui::Key::Escape) || i.viewport().close_requested()) && self.cap.is_none() { open = false }
+            },
+        );
+        if !open { self.settings_open = false }
+    }
+
+    /// Settings: a list of pages; narrow = the page slides in over the list (with a back button),
+    /// wide = list and page side by side.
+    fn settings_view(&mut self, ui: &mut egui::Ui, narrow: bool) {
+        let ctx = ui.ctx().clone();
+        let full = ui.available_rect_before_wrap();
+        if narrow {
+            let t = ease(anim(&ctx, "push", self.set_detail, 0.3));
+            let w = full.width();
+            if t < 1.0 {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(full.translate(vec2(-t * w * 0.3, 0.0))).id_salt("set_list"), |ui| {
+                    ui.set_opacity(1.0 - t * 0.7);
+                    if let Some(i) = self.settings_list(ui) { self.set_page = i; self.set_detail = true }
+                });
+            }
+            if t > 0.0 {
+                let r = full.translate(vec2((1.0 - t) * w, 0.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(r).id_salt("set_page"), |ui| {
+                    ui.horizontal(|ui| {
+                        if icon_btn(ui, Icon::Back, 32.0).clicked() { self.set_detail = false }
+                        ui.label(RichText::new(tr(SET_PAGES[self.set_page as usize % SET_PAGES.len()].1)).font(bold(18.0)));
+                    });
+                    ui.add_space(6.0);
+                    egui::ScrollArea::vertical().id_salt(("side_scroll", self.set_page)).auto_shrink(false).show(ui, |ui| self.settings_page(ui));
+                });
+            }
+            ui.allocate_rect(full, Sense::hover());
+        } else {
+            let list = Rect::from_min_size(full.min, vec2(260.0, full.height()));
+            let page = Rect::from_min_max(Pos2::new(list.right() + 28.0, full.top()), Pos2::new(full.right().min(list.right() + 28.0 + 640.0), full.bottom()));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(list).id_salt("set_list"), |ui| {
+                if let Some(i) = self.settings_list(ui) { self.set_page = i; self.page_t = Instant::now() }
+            });
+            ui.scope_builder(egui::UiBuilder::new().max_rect(page).id_salt("set_page"), |ui| {
+                {
+                    ui.label(RichText::new(tr(SET_PAGES[self.set_page as usize % SET_PAGES.len()].1)).font(bold(20.0)));
+                    ui.add_space(6.0);
+                    egui::ScrollArea::vertical().id_salt("set_scroll").auto_shrink(false).show(ui, |ui| self.settings_page(ui));
+                }
+            });
+            ui.allocate_rect(full, Sense::hover());
+        }
+    }
+
+    /// The page list: coloured icon tiles, names, chevrons, grouped like a phone's settings.
+    fn settings_list(&mut self, ui: &mut egui::Ui) -> Option<u8> {
+        let c = pal(ui.visuals().dark_mode);
+        let mut hit = None;
+        group(ui, |ui| {
+            for (i, (icon, name)) in SET_PAGES.iter().enumerate() {
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), Sense::click());
+                let h = anim(ui.ctx(), resp.id, resp.hovered(), 0.12);
+                let sel = self.set_page as usize == i;
+                let p = ui.painter();
+                if h > 0.0 || sel { p.rect_filled(rect.expand2(vec2(8.0, -2.0)), 12.0, c.hover.gamma_multiply(if sel { 0.8 } else { h * 0.6 })); }
+                let tile = Rect::from_center_size(Pos2::new(rect.left() + 16.0, rect.center().y), vec2(30.0, 30.0));
+                let hue = [c.acc, Color32::from_rgb(142, 142, 147), Color32::from_rgb(40, 160, 255), Color32::from_rgb(255, 149, 0), Color32::from_rgb(52, 199, 89), Color32::from_rgb(175, 82, 222), Color32::from_rgb(64, 156, 255)][i];
+                p.rect_filled(tile, 9.0, hue);
+                icons::draw(p, *icon, tile.shrink(6.0), Color32::WHITE);
+                p.text(Pos2::new(tile.right() + 14.0, rect.center().y), Align2::LEFT_CENTER, tr(name), FontId::proportional(15.0), c.text);
+                icons::draw(p, Icon::Chevron, Rect::from_center_size(Pos2::new(rect.right() - 10.0, rect.center().y), vec2(14.0, 14.0)), c.weak);
+                if i + 1 < SET_PAGES.len() { p.hline((tile.right() + 14.0)..=rect.right(), rect.bottom(), Stroke::new(1.0, c.line)); }
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { hit = Some(i as u8) }
+            }
+        });
+        hit
+    }
+
+    /// Status line under the content: engine state on the left, numbers on the right.
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let c = pal(ui.visuals().dark_mode);
+        let (st, status) = { let l = self.s.live.lock().unwrap(); (l.stats, l.status.clone()) };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(tr(&status)).size(12.0).color(c.weak));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(format!(
+                    "pad {} · {} upd/s · engine {} Hz · virt {}",
+                    st.slot.map_or("–".into(), |i| format!("#{}", i + 1)), st.pad_hz, st.loop_hz,
+                    st.virt_slot.map_or("–".into(), |i| format!("#{}", i + 1))
+                )).font(mono(11.0)).color(c.weak.gamma_multiply(0.8)));
+            });
+        });
+    }
+
+    // ------------------------------------------------------------- window background & overlays
+
+    fn material_kind(&self) -> i32 {
+        match self.st.backdrop { 2 => 2, 3 => 3, _ => 0 }
+    }
+
+    /// Own animated gradient: chosen, or standing in where Mica / Acrylic is not available.
+    fn aurora_on(&self) -> bool {
+        self.st.backdrop == 1 || (self.st.backdrop >= 2 && !self.material_ok)
+    }
+
+    /// Theme, accent, glass and the Windows material, applied whenever one of them changes.
+    fn look(&mut self, ctx: &egui::Context) {
+        let automatic = self.st.pad_accent && (self.st.pad_skin.is_empty() || self.st.pad_skin.starts_with("builtin:"));
+        let color = automatic.then(|| crate::pad::MODELS[crate::pad::selected_index(&self.st.pad_skin,self.st.pad_model)].accent());
+        let color_changed = set_design_accent(color);
+        let key = (self.st.theme, self.st.accent, self.st.backdrop, (self.st.opacity * 100.0) as u32, self.st.motion, self.st.size);
+        if (self.look_sent == Some(key) && !color_changed) || ctx.cumulative_frame_nr() < 2 { return }
+        if self.look_sent.is_some_and(|k| k.5 != key.5) {
+            // keep the window's look: grow / shrink it with the zoom
+            let (old, new) = (SIZES[self.look_sent.unwrap().5 as usize % 3], SIZES[self.st.size as usize % 3]);
+            if let Some(r) = ctx.input(|i| i.viewport().inner_rect) { ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(r.size() * old / new)) }
+            ctx.set_zoom_factor(new);
+        }
+        self.look_sent = Some(key);
+        ctx.set_theme(match self.st.theme { 0 => egui::ThemePreference::System, 2 => egui::ThemePreference::Light, _ => egui::ThemePreference::Dark });
+        let dark = match self.st.theme { 0 => ctx.system_theme().is_none_or(|t| t == Theme::Dark), t => t != 2 };
+        winio::round_corners("padmimic");
+        let kind = self.material_kind();
+        self.material_ok = winio::set_backdrop("padmimic", kind, dark) || kind == 0;
+        self.side_applied = false;
+        set_look(self.st.accent, if self.st.backdrop == 0 { 1.0 } else { self.st.opacity }, self.st.motion);
+        apply_colors(ctx);
+    }
+
+    /// Toast at the bottom of the window.
+    fn overlays(&mut self, ctx: &egui::Context) {
+        let c = pal(ctx.theme() == Theme::Dark);
+        let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("fx")));
+        let full = ctx.content_rect();
+        if let Some((text, at)) = &self.toast {
+            let s = at.elapsed().as_secs_f32();
+            if s < 3.0 {
+                ctx.request_repaint();
+                let a = if motion() { ease(s / 0.3) * (1.0 - ((s - 2.6) / 0.4).clamp(0.0, 1.0)) } else { 1.0 };
+                let g = p.layout_no_wrap(text.clone(), bold(14.0), Color32::WHITE);
+                let r = Rect::from_center_size(Pos2::new(full.center().x, full.bottom() - 64.0 + (1.0 - a) * 24.0), g.size() + vec2(40.0, 22.0));
+                p.rect_filled(r.translate(vec2(0.0, 4.0)), 22.0, Color32::from_black_alpha((60.0 * a) as u8));
+                p.rect_filled(r, 22.0, c.acc.gamma_multiply(a));
+                p.galley_with_override_text_color(r.center() - g.size() / 2.0, g, Color32::WHITE.gamma_multiply(a));
+            }
+        }
     }
 
     fn btn_cell(&mut self, ui: &mut egui::Ui, e: Elem, title: &str, size: Vec2, active: &[Elem]) {
@@ -1055,14 +1583,15 @@ impl App {
         }
         let used = *b != Button::default();
         let hint = if used { format!("{}\n{}", elem_name(set, e), tr("Right-click: remove assignment")) } else { elem_name(set, e) };
-        let r = cell(ui, title, &summary(b), active.contains(&e), size).on_hover_text(hint);
+        let marks: Vec<Icon> = [(b.toggle, Icon::Swap), (b.turbo, Icon::Bolt)].into_iter().filter(|m| m.0).map(|m| m.1).collect();
+        let r = cell_ex(ui, None, &marks, title, &summary_core(b), active.contains(&e), size).on_hover_text(hint);
         if r.clicked() {
             self.open(Dlg::Button(e));
         }
         let mut clear = false;
         if used {
             r.context_menu(|ui| {
-                if ui.button(format!("🗑 {}", tr("Remove assignment"))).clicked() {
+                if ui.button(tr("Remove assignment")).clicked() {
                     clear = true;
                     ui.close();
                 }
@@ -1075,14 +1604,14 @@ impl App {
 
     /// 3×3 grid around a stick / d-pad; the centre opens the element dialog.
     fn dir_grid(&mut self, ui: &mut egui::Ui, mk: impl Fn(u8) -> Elem, center: &str, dlg: Dlg, active: &[Elem], centre_active: bool) {
-        let w = ((ui.available_width() - 16.0) / 3.0).clamp(60.0, 110.0);
-        let sz = vec2(w, 44.0);
+        let w = ((ui.available_width() - 16.0) / 3.0).clamp(60.0, 120.0);
+        let sz = vec2(w, 50.0);
         const LAYOUT: [[i8; 3]; 3] = [[7, 0, 1], [6, -1, 2], [5, 4, 3]];
-        egui::Grid::new(center).spacing([6.0, 6.0]).show(ui, |ui| {
+        egui::Grid::new(center).spacing([8.0, 8.0]).show(ui, |ui| {
             for row in LAYOUT {
                 for d in row {
                     if d < 0 {
-                        if cell(ui, "", center, centre_active, sz).clicked() { self.open(dlg.clone()) }
+                        if cell_ex(ui, Some(Icon::Gear), &[], "", center, centre_active, sz).clicked() { self.open(dlg.clone()) }
                     } else {
                         self.btn_cell(ui, mk(d as u8), DIRS[d as usize], sz, active);
                     }
@@ -1095,16 +1624,16 @@ impl App {
     fn controller_tab(&mut self, ui: &mut egui::Ui, active: &[Elem]) {
         let (phys, out, vigem, hz) = { let l = self.s.live.lock().unwrap(); (l.phys, l.out, l.vigem, l.stats.pad_hz) };
         if self.show_live {
-            let sticks = self.p.sets[self.cur()].sticks.clone();
-            let trail = &mut self.trail;
-            card(ui, &format!("{} · {hz} {}", tr("Live"), tr("upd/s")), |ui| controller(ui, &phys, vigem.then_some(&out), &sticks, trail));
+            card(ui, &format!("{} · {hz} {}", tr("Live"), tr("upd/s")), |ui| self.live_view(ui, &phys, vigem.then_some(&out)));
+            ui.add_space(12.0);
         }
         let full = ui.available_width();
         let cols = if full > 700.0 { 3 } else if full > 460.0 { 2 } else { 1 };
-        let colw = (full - (cols - 1) as f32 * 10.0) / cols as f32;
+        let colw = (full - (cols - 1) as f32 * 12.0) / cols as f32;
         let blocks: Vec<u8> = vec![0, 1, 2, 3, 4];
         for chunk in blocks.chunks(cols) {
             ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
                 for &b in chunk {
                     ui.allocate_ui(vec2(colw, 0.0), |ui| {
                         ui.set_width(colw);
@@ -1114,7 +1643,7 @@ impl App {
                                 let sname = self.p.sets[self.cur()].sticks[s as usize].name.clone();
                                 card(ui, if sname.is_empty() { tr(STICK_NAMES[s as usize]) } else { &sname }, |ui| {
                                     let centre = active.iter().any(|e| matches!(e, Elem::Stick(x, _) if *x == s));
-                                    self.dir_grid(ui, |d| Elem::Stick(s, d), &format!("⚙ {}", tr("Stick")), Dlg::Stick(s), active, centre);
+                                    self.dir_grid(ui, |d| Elem::Stick(s, d), tr("Stick"), Dlg::Stick(s), active, centre);
                                     let w = ui.available_width();
                                     self.btn_cell(ui, Elem::StickMod(s), tr("Modifier"), vec2(w, 40.0), active);
                                 });
@@ -1123,7 +1652,7 @@ impl App {
                                 let name = self.p.sets[self.cur()].dpad.name.clone();
                                 card(ui, if name.is_empty() { "D-Pad" } else { &name }, |ui| {
                                     let centre = active.iter().any(|e| matches!(e, Elem::DPad(_)));
-                                    self.dir_grid(ui, Elem::DPad, "⚙ D-Pad", Dlg::DPad, active, centre);
+                                    self.dir_grid(ui, Elem::DPad, "D-Pad", Dlg::DPad, active, centre);
                                 });
                             }
                             3 => {
@@ -1132,16 +1661,16 @@ impl App {
                                         let a = &self.p.sets[self.cur()].triggers[t as usize];
                                         let neg = a.throttle < 0;
                                         let title = if a.name.is_empty() { TRIG_NAMES[t as usize].to_string() } else { a.name.clone() };
-                                        let analog = match a.analog { Some(VTrigger::Left) => " → 🎮 LT", Some(VTrigger::Right) => " → 🎮 RT", None => "" };
+                                        let analog = match a.analog { Some(VTrigger::Left) => " → LT", Some(VTrigger::Right) => " → RT", None => "" };
                                         ui.horizontal(|ui| {
                                             let pressed = active.contains(&Elem::Trig(t, true)) || active.contains(&Elem::Trig(t, false));
-                                            if cell(ui, "", &format!("⚙ {title}{analog}"), pressed, vec2(ui.available_width() * 0.5, 44.0)).clicked() { self.open(Dlg::Axis(t)) }
+                                            if cell_ex(ui, Some(Icon::Gear), &[], "", &format!("{title}{analog}"), pressed, vec2(ui.available_width() * 0.5, 50.0)).clicked() { self.open(Dlg::Axis(t)) }
                                             let w = ui.available_width();
                                             if neg {
-                                                self.btn_cell(ui, Elem::Trig(t, false), "−", vec2(w / 2.0 - 4.0, 44.0), active);
-                                                self.btn_cell(ui, Elem::Trig(t, true), "+", vec2(w / 2.0 - 4.0, 44.0), active);
+                                                self.btn_cell(ui, Elem::Trig(t, false), "−", vec2(w / 2.0 - 4.0, 50.0), active);
+                                                self.btn_cell(ui, Elem::Trig(t, true), "+", vec2(w / 2.0 - 4.0, 50.0), active);
                                             } else {
-                                                self.btn_cell(ui, Elem::Trig(t, true), tr("Press"), vec2(w, 44.0), active);
+                                                self.btn_cell(ui, Elem::Trig(t, true), tr("Press"), vec2(w, 50.0), active);
                                             }
                                         });
                                     }
@@ -1149,10 +1678,10 @@ impl App {
                             }
                             _ => {
                                 card(ui, tr("Buttons"), |ui| {
-                                    let w = ((ui.available_width() - 12.0) / 3.0).max(60.0);
-                                    egui::Grid::new("buttons").spacing([6.0, 6.0]).show(ui, |ui| {
+                                    let w = ((ui.available_width() - 16.0) / 3.0).max(60.0);
+                                    egui::Grid::new("buttons").spacing([8.0, 8.0]).show(ui, |ui| {
                                         for i in 0..11u8 {
-                                            self.btn_cell(ui, Elem::Btn(i), BTN_NAMES[i as usize], vec2(w, 44.0), active);
+                                            self.btn_cell(ui, Elem::Btn(i), BTN_NAMES[i as usize], vec2(w, 50.0), active);
                                             if i % 3 == 2 { ui.end_row() }
                                         }
                                     });
@@ -1162,8 +1691,106 @@ impl App {
                     });
                 }
             });
-            ui.add_space(4.0);
+            ui.add_space(12.0);
         }
+    }
+
+    /// The chosen controller live: an own skin from skins/, else the built-in model.
+    fn live_view(&mut self, ui: &mut egui::Ui, phys: &XGamepad, out: Option<&XGamepad>) {
+        if !self.skins_loaded { self.reload_skins(ui.ctx()) }
+        if self.tab == Tab::Controller {
+            // pop the controller out into its own overlay window, or back in
+            let at = Rect::from_min_size(Pos2::new(ui.max_rect().right() - 30.0, ui.max_rect().top() - 5.0), vec2(30.0, 30.0));
+            let on = self.st.overlay.enabled;
+            let tip = tr(if on { "Close the controller overlay" } else { "Pop the controller out into its own window" });
+            if ui.put(at, |ui: &mut egui::Ui| icon_btn(ui, if on { Icon::Close } else { Icon::PopOut }, 30.0)).on_hover_text(tip).clicked() {
+                self.st.overlay.enabled = !on;
+            }
+        }
+        if let Some(s) = self.skins.iter().find(|s| s.id == self.st.pad_skin) {
+            let w = ui.available_width().min(520.0);
+            let hgt = w * s.aspect();
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), hgt), Sense::hover());
+            s.paint(ui.painter(), Rect::from_center_size(r.center(), vec2(w, hgt)), phys);
+        } else {
+            let sticks = self.p.sets[self.cur()].sticks.clone();
+            crate::pad::controller_sized(ui, crate::pad::selected_index(&self.st.pad_skin, self.st.pad_model) as u8, phys, out, &sticks, &mut self.trail, if self.tab == Tab::Custom { 300.0 } else { 440.0 });
+        }
+    }
+
+    fn reload_skins(&mut self, ctx: &egui::Context) {
+        (self.skins, self.skin_errs) = crate::skin::scan(ctx);
+        self.skins_loaded = true;
+    }
+
+    /// Customization: live preview of the choice, filter, a shop-style grid of controllers and
+    /// own skins, and the skins folder.
+    fn custom_tab(&mut self, ui: &mut egui::Ui) {
+        use crate::pad::{self, MODELS};
+        let (phys, out, vigem) = { let l = self.s.live.lock().unwrap(); (l.phys, l.out, l.vigem) };
+        let c = pal(ui.visuals().dark_mode);
+        if !self.skins_loaded { self.reload_skins(ui.ctx()) }
+        let title = self.skins.iter().find(|s| s.id == self.st.pad_skin).map(|s| s.name.clone()).unwrap_or_else(|| MODELS[pad::selected_index(&self.st.pad_skin, self.st.pad_model)].name.into());
+        card(ui, &title, |ui| self.live_view(ui, &phys, vigem.then_some(&out)));
+
+        ui.add_space(16.0);
+        segmented(ui, "cust_filter", &mut self.cust_filter, &[tr("All"), "PS5", "PS4", "Xbox", tr("My skins")]);
+        ui.add_space(14.0);
+        let gap = 14.0;
+        let full = ui.available_width();
+        let cols = ((full + gap) / (230.0 + gap)).floor().max(1.0);
+        let tw = ((full - gap * (cols - 1.0)) / cols).floor();
+        let f = self.cust_filter;
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.cust_search).hint_text(tr("Search controllers…")).desired_width((full - 100.0).max(100.0)));
+            ui.weak(format!("{}", MODELS.len()));
+        });
+        ui.add_space(12.0);
+        let search = self.cust_search.trim().to_lowercase();
+        let selected = pad::selected_index(&self.st.pad_skin, self.st.pad_model);
+        let mut visible = 0;
+        let mut pick: Option<(u8, String)> = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(gap, gap);
+            if f < 4 {
+                for (mi, md) in MODELS.iter().enumerate().filter(|(_, m)| m.matches_filter(f) && (m.name.to_lowercase().contains(&search) || m.id.contains(&search) || m.tag().to_lowercase().contains(&search))) {
+                    visible += 1;
+                    let chosen = !self.skins.iter().any(|s| s.id == self.st.pad_skin) && selected == mi;
+                    let tag = if md.animated() { format!("{} · {}", md.tag(), tr("Animated")) } else { md.tag().into() };
+                    let id = ui.id().with(("tile", mi));
+                    if pad::tile(ui, tw, md.name, &tag, chosen, |p, r, demo| { if let Some(g) = demo { pad::paint_model(p, id, r, mi, &g) } else { pad::thumbnail(p, r, mi) } }).clicked() {
+                        pick = Some((mi as u8, format!("builtin:{}", md.id)));
+                    }
+                }
+            }
+            if f == 0 || f == 4 {
+                for s in self.skins.iter().filter(|s| s.name.to_lowercase().contains(&search)) {
+                    visible += 1;
+                    if pad::tile(ui, tw, &s.name, tr("My skin"), self.st.pad_skin == s.id, |p, r, demo| s.paint(p, r, &demo.unwrap_or_default())).clicked() {
+                        pick = Some((self.st.pad_model, s.id.clone()));
+                    }
+                }
+            }
+        });
+        if let Some((m, s)) = pick { self.st.pad_model = m; self.st.pad_skin = s; }
+        if visible == 0 { ui.label(RichText::new(tr("No matching controllers.")).color(c.weak)); }
+
+        ui.add_space(18.0);
+        let mut reload = false;
+        card(ui, tr("Your own skins"), |ui| {
+            ui.label(RichText::new(tr("Add a folder with a skin.json and its images to the skins folder. Your own skins appear alongside the included controller designs.")).color(c.weak));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if pill(ui, tr("Open skins folder"), true).clicked() {
+                    let d = crate::skin::dir();
+                    let _ = std::fs::create_dir_all(&d);
+                    let _ = std::process::Command::new("explorer").arg(&d).spawn();
+                }
+                if pill(ui, tr("Reload"), false).clicked() { reload = true }
+            });
+            for e in &self.skin_errs { ui.label(RichText::new(e).size(12.0).color(c.amber)); }
+        });
+        if reload { self.reload_skins(ui.ctx()) }
     }
 
     fn kbm_tab(&mut self, ui: &mut egui::Ui, active: &[Elem]) {
@@ -1174,7 +1801,7 @@ impl App {
             for i in 0..n {
                 ui.horizontal(|ui| {
                     let vk = self.p.sets[self.cur()].keys[i].vk;
-                    let label = if self.capturing(Cap::KeyBind(i)) { tr("Press a key…").into() } else { format!("⌨ {}", winio::key_name(vk)) };
+                    let label = if self.capturing(Cap::KeyBind(i)) { tr("Press a key…").into() } else { winio::key_name(vk) };
                     if ui.add(egui::Button::new(label).min_size(vec2(130.0, 30.0))).clicked() { self.cap = Some((Cap::KeyBind(i), false)) }
                     ui.label("→");
                     let w = (ui.available_width() - 36.0).max(80.0);
@@ -1186,7 +1813,7 @@ impl App {
                 self.set().keys.remove(i);
                 self.cap = None;
             }
-            if ui.button(format!("＋ {}", tr("Assignment"))).clicked() {
+            if ui.button(format!("+  {}", tr("Assignment"))).clicked() {
                 self.set().keys.push(KeyBind { vk: 0x20, btn: Button::out(Act::Pad(Out::A)) });
             }
         });
@@ -1206,70 +1833,18 @@ impl App {
         });
     }
 
-    fn bottom(&mut self, ui: &mut egui::Ui) {
-        let cur = self.cur();
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(tr("Sets")).weak());
-            for i in 0..8 {
-                let name = &self.p.set_names[i];
-                let r = ui.selectable_label(cur == i, format!("{}", i + 1)).on_hover_text(if name.is_empty() { format!("{} {}", tr("Set"), i + 1) } else { name.clone() });
-                if r.clicked() { *self.s.set_cmd.lock().unwrap() = Some(i) }
-            }
-            ui.separator();
-            if ui.button(tr("Quick set")).clicked() {
-                let held = self.s.live.lock().unwrap().active.clone();
-                self.open(Dlg::QuickSet(held));
-            }
-            if ui.button(tr("Names")).clicked() { self.open(Dlg::Names) }
-            if ui.button(tr("Profile")).clicked() { self.open(Dlg::Pref) }
-            if ui.button(tr("Reset")).clicked() { self.open(Dlg::Reset) }
-        });
-        let (st, status, vigem) = { let l = self.s.live.lock().unwrap(); (l.stats, l.status.clone(), l.vigem) };
-        if !vigem && status == engine::VIGEM_MISSING {
-            let msg = self.vigem_msg.lock().unwrap().clone();
-            let busy = msg.as_deref() == Some(INSTALLING);
-            ui.horizontal(|ui| {
-                let b = ui.add_enabled(!busy, egui::Button::new(tr(if busy { INSTALLING } else { "Install ViGEmBus" })))
-                    .on_hover_text(tr("Driver for the virtual Xbox controller (by Nefarius, signed). Windows asks once for admin rights. padmimic connects by itself afterwards."));
-                if b.clicked() {
-                    let m = self.vigem_msg.clone();
-                    *m.lock().unwrap() = Some(INSTALLING.into());
-                    std::thread::spawn(move || {
-                        let r = match winio::install_vigem() {
-                            Ok(false) => "ViGEmBus installed – connecting in a few seconds".into(),
-                            Ok(true) => "ViGEmBus installed – please restart Windows".into(),
-                            Err(e) => e,
-                        };
-                        *m.lock().unwrap() = Some(r);
-                    });
-                }
-                if let Some(m) = msg.filter(|m| m != INSTALLING) { ui.small(tr(&m)); }
-            });
-        }
-        ui.horizontal(|ui| {
-            ui.small(tr(&status));
-            ui.label(RichText::new(format!(
-                "PAD {} · {} UPD/S · ENGINE {} HZ · VIRT {}",
-                st.slot.map_or("–".into(), |i| format!("#{}", i + 1)), st.pad_hz, st.loop_hz,
-                st.virt_slot.map_or("–".into(), |i| format!("#{}", i + 1))
-            )).font(mono(11.0)).color(pal(ui.visuals().dark_mode).weak));
-            if let Some((t, at)) = &self.toast {
-                if at.elapsed() < Duration::from_secs(3) { ui.small(RichText::new(t.as_str()).color(accent(ui.visuals().dark_mode))); }
-            }
-        });
-    }
-
     // ------------------------------------------------------------- dialogs
 
     fn dialogs(&mut self, ctx: &egui::Context) {
         let list = self.dlgs.clone();
+        self.dlg_t.resize(list.len(), Instant::now());
         let mut close = vec![];
+        let solid = pal_with(ctx.theme() == Theme::Dark, 1.0);
         for (i, d) in list.iter().enumerate() {
             if *d == Dlg::Latency {
                 if !self.latency_window(ctx) { close.push(d.clone()) }
                 continue;
             }
-            let mut open = true;
             let (title, width) = match d {
                 Dlg::Button(e) => (format!("{} – {}", tr("Assignment"), elem_name(&self.p.sets[self.cur()], *e)), 640.0),
                 Dlg::Advanced(e) => (format!("{} – {}", tr("Advanced"), elem_name(&self.p.sets[self.cur()], *e)), 660.0),
@@ -1277,54 +1852,65 @@ impl App {
                 Dlg::DPad => ("D-Pad".into(), 380.0),
                 Dlg::Axis(t) => (format!("{} {}", tr("Axis"), TRIG_NAMES[*t as usize]), 420.0),
                 Dlg::Mouse(_) => (tr("Mouse settings").into(), 760.0),
-                Dlg::Names => (tr("Set names").into(), 320.0),
-                Dlg::Pref => (tr("Profile settings").into(), 380.0),
-                Dlg::QuickSet(_) => (tr("Quick set").into(), 320.0),
-                Dlg::Settings => (tr("Settings").into(), 640.0),
-                Dlg::SaveAs(_) => (tr("Save as").into(), 320.0),
-                Dlg::Reset => (tr("Reset").into(), 360.0),
-                Dlg::About => (tr("About padmimic").into(), 360.0),
+                Dlg::Names => (tr("Set names").into(), 340.0),
+                Dlg::Pref => (tr("Profile settings").into(), 400.0),
+                Dlg::QuickSet(_) => (tr("Quick set").into(), 340.0),
+                Dlg::SaveAs(_) => (tr("Save as").into(), 340.0),
+                Dlg::Reset => (tr("Reset").into(), 380.0),
+                Dlg::About => (tr("About padmimic").into(), 380.0),
                 Dlg::Latency => (tr("Latency meter").into(), 560.0),
-                Dlg::Update => (tr("Update").into(), 380.0),
+                Dlg::Update => (tr("Update").into(), 400.0),
             };
+            // sheets: centred, dimmed backdrop, fade in while rising a little; not movable
+            let e = if motion() { ease(self.dlg_t[i].elapsed().as_secs_f32() / 0.26) } else { 1.0 };
+            if e < 1.0 { ctx.request_repaint() }
+            let id = egui::Id::new(("sheet", i, format!("{:?}", std::mem::discriminant(d))));
+            let area = egui::Modal::default_area(id).pivot(Align2::CENTER_CENTER).fixed_pos(ctx.content_rect().center() + vec2(0.0, (1.0 - e) * 22.0));
+            let frame = egui::Frame::new().fill(solid.card).stroke(Stroke::new(1.0, solid.line)).corner_radius(26).inner_margin(24)
+                .shadow(egui::Shadow { offset: [0, 18], blur: 50, spread: 0, color: Color32::from_black_alpha((120.0 * e) as u8) });
+            let mut closed = false;
             let mut done = false;
-            egui::Window::new(title)
-                .id(egui::Id::new(("dlg", i, format!("{:?}", std::mem::discriminant(d)))))
-                .open(&mut open)
-                .collapsible(false)
-                .auto_sized() // grows with its content, so nothing is cut off
-                .min_width(width)
-                .pivot(Align2::CENTER_TOP)
-                .default_pos(Pos2::new(ctx.content_rect().center().x + i as f32 * 18.0, 40.0 + i as f32 * 18.0))
-                .show(ctx, |ui| {
-                    let max_h = ctx.content_rect().height() - 110.0;
-                    egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| done = match d.clone() {
-                        Dlg::Button(e) => self.dlg_button(ui, e),
-                        Dlg::Advanced(e) => self.dlg_advanced(ui, e),
-                        Dlg::Stick(s) => self.dlg_stick(ui, s),
-                        Dlg::DPad => self.dlg_dpad(ui),
-                        Dlg::Axis(t) => self.dlg_axis(ui, t),
-                        Dlg::Mouse(t) => self.dlg_mouse(ui, t),
-                        Dlg::Names => self.dlg_names(ui),
-                        Dlg::Pref => self.dlg_pref(ui),
-                        Dlg::QuickSet(held) => self.dlg_quickset(ui, &held),
-                        Dlg::Settings => self.dlg_settings(ui),
-                        Dlg::SaveAs(_) => self.dlg_save_as(ui, i),
-                        Dlg::Reset => self.dlg_reset(ui),
-                        Dlg::About => self.dlg_about(ui),
-                        Dlg::Latency => true, // own window, see latency_window
-                        Dlg::Update => self.dlg_update(ui),
+            let r = egui::Modal::new(id).area(area).frame(frame).backdrop_color(Color32::from_black_alpha((110.0 * e) as u8)).show(ctx, |ui| {
+                ui.set_opacity(e);
+                ui.set_min_width(width);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&title).font(bold(19.0)));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_btn(ui, Icon::Close, 32.0).clicked() { closed = true }
                     });
                 });
-            if !open || done { close.push(d.clone()) }
+                ui.add_space(6.0);
+                let max_h = ctx.content_rect().height() - 160.0;
+                egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| done = match d.clone() {
+                    Dlg::Button(e) => self.dlg_button(ui, e),
+                    Dlg::Advanced(e) => self.dlg_advanced(ui, e),
+                    Dlg::Stick(s) => self.dlg_stick(ui, s),
+                    Dlg::DPad => self.dlg_dpad(ui),
+                    Dlg::Axis(t) => self.dlg_axis(ui, t),
+                    Dlg::Mouse(t) => self.dlg_mouse(ui, t),
+                    Dlg::Names => self.dlg_names(ui),
+                    Dlg::Pref => self.dlg_pref(ui),
+                    Dlg::QuickSet(held) => self.dlg_quickset(ui, &held),
+                    Dlg::SaveAs(_) => self.dlg_save_as(ui, i),
+                    Dlg::Reset => self.dlg_reset(ui),
+                    Dlg::About => self.dlg_about(ui),
+                    Dlg::Latency => true, // own window, see latency_window
+                    Dlg::Update => self.dlg_update(ui),
+                });
+            });
+            let top = i + 1 == list.len();
+            if closed || done || (top && r.should_close() && self.cap.is_none()) { close.push(d.clone()) }
         }
+        let keep: Vec<bool> = self.dlgs.iter().map(|d| !close.contains(d)).collect();
+        let mut k = keep.iter();
+        self.dlg_t.retain(|_| *k.next().unwrap_or(&true));
         self.dlgs.retain(|d| !close.contains(d));
     }
 
     fn ok_row(ui: &mut egui::Ui) -> bool {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(egui::Button::new(RichText::new(tr("Done")).color(Color32::WHITE)).fill(accent(ui.visuals().dark_mode)).min_size(vec2(84.0, 28.0))).clicked()
+                pill(ui, tr("Done"), true).clicked()
             })
             .inner
         })
@@ -1346,9 +1932,9 @@ impl App {
         ui.separator();
         let mut cap = false;
         ui.horizontal(|ui| {
-            cap = ui.button(if capturing { tr("Press…").to_string() } else { format!("⏺ {}", tr("Record")) }).clicked();
+            cap = ui.button(if capturing { tr("Press…") } else { tr("Record") }).clicked();
             // everything off: outputs, turbo, toggle, set change, name
-            if ui.button(format!("🗑 {}", tr("Remove"))).on_hover_text(tr("Remove the whole assignment")).clicked() { *b = Button::default() }
+            if ui.button(tr("Remove")).on_hover_text(tr("Remove the whole assignment")).clicked() { *b = Button::default() }
             ui.checkbox(&mut b.toggle, tr("Toggle"));
             ui.checkbox(&mut b.turbo, tr("Turbo"));
         });
@@ -1360,7 +1946,7 @@ impl App {
             ui.text_edit_singleline(&mut b.action);
             ui.end_row();
             ui.label(tr("Slots:"));
-            ui.label(RichText::new(summary(&Button { action: String::new(), ..b.clone() })).strong());
+            ui.label(RichText::new(summary(&Button { action: String::new(), ..b.clone() })).font(bold(14.0)));
             ui.end_row();
         });
         let done = ui.horizontal(|ui| {
@@ -1427,7 +2013,7 @@ impl App {
                         match s {
                             Slot::Out(a) => {
                                 if let Some(n) = act_picker(ui, &mut tab, Some(*a), numpad) { *a = n }
-                                if ui.button(if capturing_slot == Some(sel) { tr("Press…").to_string() } else { format!("⏺ {}", tr("Record")) }).clicked() { cap_slot = Some(sel) }
+                                if ui.button(if capturing_slot == Some(sel) { tr("Press…") } else { tr("Record") }).clicked() { cap_slot = Some(sel) }
                             }
                             Slot::Pause(ms) => { ms_field(ui, tr("Time"), ms, 600_000); }
                             Slot::Hold(ms) => { ms_field(ui, tr("Time"), ms, 600_000); }
@@ -1591,8 +2177,8 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(format!("{} →", tr("Analog")));
                     ui.selectable_value(&mut s.analog, None, tr("Off"));
-                    ui.selectable_value(&mut s.analog, Some(VStick::Left), "🎮 L-Stick");
-                    ui.selectable_value(&mut s.analog, Some(VStick::Right), "🎮 R-Stick");
+                    ui.selectable_value(&mut s.analog, Some(VStick::Left), "L-Stick");
+                    ui.selectable_value(&mut s.analog, Some(VStick::Right), "R-Stick");
                 });
                 ui.horizontal(|ui| {
                     ui.label(tr("Name:"));
@@ -1664,8 +2250,8 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(format!("{} →", tr("Analog")));
             ui.selectable_value(&mut a.analog, None, tr("Off"));
-            ui.selectable_value(&mut a.analog, Some(VTrigger::Left), "🎮 LT");
-            ui.selectable_value(&mut a.analog, Some(VTrigger::Right), "🎮 RT");
+            ui.selectable_value(&mut a.analog, Some(VTrigger::Left), "LT");
+            ui.selectable_value(&mut a.analog, Some(VTrigger::Right), "RT");
         });
         ui.horizontal(|ui| { ui.label(tr("Name:")); ui.text_edit_singleline(&mut a.name); });
         let done = ui.horizontal(|ui| {
@@ -1787,107 +2373,177 @@ impl App {
         ui.button(tr("Cancel")).clicked()
     }
 
-    fn dlg_settings(&mut self, ui: &mut egui::Ui) -> bool {
-        let mut page = self.set_page;
+    fn settings_page(&mut self, ui: &mut egui::Ui) {
         let toggle_cap = self.capturing(Cap::Toggle);
         let mut cap_toggle = false;
         let mut pick_lang = None;
         let mut check_now = false;
+        let mut defaults = false;
+        let material_ok = self.material_ok;
         let st = &mut self.st;
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(130.0);
-                for (i, l) in ["General", "Language", "Auto profile", "Mouse", "Engine"].into_iter().enumerate() {
-                    ui.selectable_value(&mut page, i as u8, tr(l));
-                }
-            });
-            ui.add_space(10.0); // no vertical separator: it takes all available height and stretches the dialog
-            ui.vertical(|ui| match page {
-                0 => {
-                    ui.horizontal(|ui| { ui.label(tr("Profile folder:")); ui.text_edit_singleline(&mut st.profile_dir); });
-                    rg(tr("Recent profiles")).show(ui, &mut st.recent_count, 1..=100);
-                    ui.checkbox(&mut st.auto_load_last, tr("Load the last profile on start"));
-                    ui.checkbox(&mut st.startup, tr("Start with Windows"));
-                    ui.checkbox(&mut st.hide_empty, tr("Hide empty buttons"));
-                    ui.checkbox(&mut st.numpad, tr("Show the numpad on the keyboard"));
+        match self.set_page {
+            0 => {
+                caption(ui, tr("Size"));
+                group(ui, |ui| segmented(ui, "size", &mut st.size, &[tr("Small"), tr("Medium"), tr("Large")]));
+                caption(ui, tr("Theme"));
+                group(ui, |ui| segmented(ui, "theme", &mut st.theme, &[tr("System"), tr("Dark"), tr("Light")]));
+                caption(ui, tr("Accent colour"));
+                group(ui, |ui| {
+                    row_switch(ui, &mut st.pad_accent, tr("Match controller colours"));
+                    ui.add_enabled_ui(!st.pad_accent, |ui| accent_picker(ui, &mut st.accent));
+                });
+                caption(ui, tr("Background"));
+                group(ui, |ui| {
+                    backdrop_picker(ui, &mut st.backdrop);
+                    if st.backdrop >= 2 && !material_ok { ui.label(RichText::new(tr("Needs Windows 11 – Aurora is shown instead.")).size(12.0).weak()); }
+                    if st.backdrop != 0 {
+                        let mut pct = ((1.0 - st.opacity) * 100.0).round();
+                        if rg(tr("Transparency")).suffix(" %").dec(0).show(ui, &mut pct, 0.0..=80.0).changed() { st.opacity = 1.0 - pct / 100.0 }
+                    }
+                });
+                caption(ui, tr("Settings open"));
+                group(ui, |ui| {
+                    segmented(ui, "dock", &mut st.dock, &[tr("Beside the window"), tr("Inside the app")]);
+                    ui.add_enabled_ui(st.dock == 0, |ui| { row_switch(ui, &mut st.smart_docking, tr("Smart positioning across monitors")); });
+                    ui.label(RichText::new(tr("Switches left only at the desktop edge. Turn off to use each monitor separately.")).size(12.).weak());
+                });
+                ui.add_space(8.0);
+                group(ui, |ui| { row_switch(ui, &mut st.motion, tr("Animations")); });
+            }
+            1 => {
+                group(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(tr("On/off hotkey:"));
-                        let l = if toggle_cap { tr("Press…").to_string() } else { match st.toggle { Input::Key(k) => winio::key_name(k), Input::Pad(o) => format!("🎮 {}", o.label()) } };
-                        cap_toggle = ui.button(l).clicked();
+                        ui.label(tr("Profile folder:"));
+                        ui.add(egui::TextEdit::singleline(&mut st.profile_dir).desired_width(f32::INFINITY));
                     });
+                    rg(tr("Recent profiles")).show(ui, &mut st.recent_count, 1..=100);
+                });
+                group(ui, |ui| {
+                    row_switch(ui, &mut st.auto_load_last, tr("Load the last profile on start"));
+                    row_switch(ui, &mut st.startup, tr("Start with Windows"));
+                    row_switch(ui, &mut st.hide_empty, tr("Hide empty buttons"));
+                    row_switch(ui, &mut st.numpad, tr("Show the numpad on the keyboard"));
+                });
+                group(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut st.check_updates, tr("Check for updates on start"));
+                        ui.set_min_height(40.0);
+                        ui.label(tr("On/off hotkey:"));
+                        let l = if toggle_cap { tr("Press…").to_string() } else { match st.toggle { Input::Key(k) => winio::key_name(k), Input::Pad(o) => format!("{} {}", tr("Pad"), o.label()) } };
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| cap_toggle = ui.button(l).clicked());
+                    });
+                    row_switch(ui, &mut st.check_updates, tr("Check for updates on start"));
+                    ui.horizontal(|ui| {
                         check_now = ui.button(tr("Check now")).clicked();
                         let status = match &*self.upd.lock().unwrap() {
                             Upd::Checking => tr("Checking…").to_string(),
                             Upd::Latest => tr("padmimic is up to date").to_string(),
-                            Upd::Available(r) => format!("⬆ v{}", r.version),
+                            Upd::Available(r) => format!("v{}", r.version),
                             Upd::Failed(e) => tr(e).to_string(),
                             _ => String::new(),
                         };
                         ui.weak(status);
                     });
-                    card(ui, tr("Key repeat"), |ui| {
-                        ui.checkbox(&mut st.key_repeat, tr("Active"));
-                        ui.add_enabled_ui(st.key_repeat, |ui| rg(tr("Delay")).suffix(" ms").show(ui, &mut st.key_repeat_delay, 0..=1000));
-                        ui.add_enabled_ui(st.key_repeat, |ui| rg(tr("Rate")).suffix("/s").show(ui, &mut st.key_repeat_rate, 5..=250));
-                    });
-                }
-                1 => pick_lang = lang_grid(ui, i18n::cur(), &[]),
-                2 => {
-                    ui.weak(tr("Loads a profile automatically as soon as the program is in the foreground."));
-                    ui.checkbox(&mut st.auto_profile, tr("Active"));
+                });
+                caption(ui, tr("Key repeat"));
+                group(ui, |ui| {
+                    row_switch(ui, &mut st.key_repeat, tr("Active"));
+                    ui.add_enabled_ui(st.key_repeat, |ui| rg(tr("Delay")).suffix(" ms").show(ui, &mut st.key_repeat_delay, 0..=1000));
+                    ui.add_enabled_ui(st.key_repeat, |ui| rg(tr("Rate")).suffix("/s").show(ui, &mut st.key_repeat_rate, 5..=250));
+                });
+                ui.add_space(10.0);
+                defaults = pill(ui, tr("Defaults"), false).clicked();
+            }
+            2 => pick_lang = lang_grid(ui, i18n::cur(), &[]),
+            3 => {
+                ui.label(RichText::new(tr("Loads a profile automatically as soon as the program is in the foreground.")).weak());
+                ui.add_space(4.0);
+                group(ui, |ui| {
+                    row_switch(ui, &mut st.auto_profile, tr("Active"));
                     let mut remove = None;
                     for (i, a) in st.auto_profiles.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut a.exe).hint_text("game.exe").desired_width(140.0));
+                            ui.add(egui::TextEdit::singleline(&mut a.exe).hint_text("game.exe").desired_width(120.0));
                             ui.label("→");
-                            egui::ComboBox::from_id_salt(("ap", i)).width(160.0).selected_text(stem(&a.profile)).show_ui(ui, |ui| {
+                            egui::ComboBox::from_id_salt(("ap", i)).width(130.0).selected_text(stem(&a.profile)).show_ui(ui, |ui| {
                                 for p in &self.profiles { ui.selectable_value(&mut a.profile, p.clone(), stem(p)); }
                             });
-                            if ui.small_button("×").clicked() { remove = Some(i) }
+                            if icon_btn(ui, Icon::Trash, 28.0).clicked() { remove = Some(i) }
                         });
                     }
                     if let Some(i) = remove { st.auto_profiles.remove(i); }
-                    ui.horizontal(|ui| {
-                        if ui.button(format!("＋ {}", tr("Add"))).clicked() { st.auto_profiles.push(AutoProfile { exe: String::new(), profile: String::new() }) }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button(format!("+  {}", tr("Add"))).clicked() { st.auto_profiles.push(AutoProfile { exe: String::new(), profile: String::new() }) }
                         if ui.button(tr("Current foreground program")).on_hover_text(tr("The active program is filled in after 3 s")).clicked() {
                             st.auto_profiles.push(AutoProfile { exe: "…".into(), profile: self.path.clone() });
                         }
                     });
-                }
-                3 => {
-                    ui.checkbox(&mut st.disable_epp, tr("Turn off Windows “Enhance pointer precision”"));
-                    card(ui, tr("Smoothing"), |ui| {
-                        ui.checkbox(&mut st.smoothing, tr("Active"));
-                        ui.add_enabled_ui(st.smoothing, |ui| rg(tr("History size")).show(ui, &mut st.history, 1..=100));
-                        ui.add_enabled_ui(st.smoothing, |ui| rg(tr("Weight")).show(ui, &mut st.weight, 0.0..=1.0));
-                    });
-                    rg(tr("Mouse refresh")).suffix(" ms").show(ui, &mut st.mouse_refresh, 1..=16);
-                }
-                _ => {
+                });
+            }
+            4 => {
+                group(ui, |ui| { row_switch(ui, &mut st.disable_epp, tr("Turn off Windows “Enhance pointer precision”")); });
+                caption(ui, tr("Smoothing"));
+                group(ui, |ui| {
+                    row_switch(ui, &mut st.smoothing, tr("Active"));
+                    ui.add_enabled_ui(st.smoothing, |ui| rg(tr("History size")).show(ui, &mut st.history, 1..=100));
+                    ui.add_enabled_ui(st.smoothing, |ui| rg(tr("Weight")).show(ui, &mut st.weight, 0.0..=1.0));
+                });
+                ui.add_space(8.0);
+                group(ui, |ui| { rg(tr("Mouse refresh")).suffix(" ms").show(ui, &mut st.mouse_refresh, 1..=16); });
+            }
+            6 => {
+                group(ui, |ui| {
+                    row_switch(ui, &mut st.overlay.enabled, tr("Show controller overlay"));
+                    row_switch(ui, &mut st.overlay.always_on_top, tr("Always on top"));
+                    row_switch(ui, &mut st.overlay.locked, tr("Lock overlay (pass mouse clicks through)"));
+                });
+                ui.label(RichText::new(tr("Uses your selected controller with live inputs. Transparent background, no glow.")).weak());
+                caption(ui, tr("Size and position"));
+                group(ui, |ui| {
+                    let mut width = st.overlay.size[0];
+                    if rg(tr("Width")).suffix(" px").show(ui, &mut width, 160.0..=1600.0).changed() {
+                        let size = crate::overlay::default_size(width);
+                        st.overlay.size = [size.x, size.y];
+                    }
+                    if ui.button(tr("Reset size and position")).clicked() {
+                        st.overlay.size = OverlaySettings::default().size;
+                        // Put a lost/offscreen overlay back beside the main window's top-left.
+                        let position = ui.ctx().input(|i| i.raw.viewports.get(&egui::ViewportId::ROOT).and_then(|v| v.inner_rect).map(|r| r.min + vec2(40., 40.)));
+                        st.overlay.position = Some(position.map_or([100., 100.], |p| [p.x, p.y]));
+                    }
+                });
+                ui.label(RichText::new(tr("Left-drag to move. Drag any edge or corner to resize. Unlock the overlay first.")).weak());
+                ui.add_space(8.0);
+                caption(ui, tr("Streaming"));
+                ui.label(RichText::new(tr("For Discord, share the screen containing the overlay. Sharing only a game window may not include a separate overlay.")).weak());
+            }
+            _ => {
+                group(ui, |ui| {
                     ui.horizontal(|ui| {
+                        ui.set_min_height(40.0);
                         ui.label(tr("Controller polling:"));
-                        egui::ComboBox::from_id_salt("hz").selected_text(format!("{} Hz", st.hz)).show_ui(ui, |ui| {
-                            for hz in [125, 250, 500, 1000, 2000, 4000, 8000] { ui.selectable_value(&mut st.hz, hz, format!("{hz} Hz")); }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            egui::ComboBox::from_id_salt("hz").selected_text(format!("{} Hz", st.hz)).show_ui(ui, |ui| {
+                                for hz in [125, 250, 500, 1000, 2000, 4000, 8000] { ui.selectable_value(&mut st.hz, hz, format!("{hz} Hz")); }
+                            });
                         });
                     });
-                    ui.weak(tr("How often controller, keyboard and mouse are read and outputs are sent (high-resolution timer, highest thread priority)."));
-                    ui.weak(tr("Hide the real controller with HidHide and allow padmimic.exe there, so games only see the virtual pad."));
-                }
-            });
-        });
-        self.set_page = page;
+                });
+                ui.add_space(6.0);
+                ui.label(RichText::new(tr("How often controller, keyboard and mouse are read and outputs are sent (high-resolution timer, highest thread priority).")).weak());
+                ui.label(RichText::new(tr("Hide the real controller with HidHide and allow padmimic.exe there, so games only see the virtual pad.")).weak());
+            }
+        }
         if cap_toggle { self.cap = Some((Cap::Toggle, false)) }
         if let Some(l) = pick_lang { self.set_lang(ui.ctx(), l) }
         if check_now { self.check_updates() }
-        let mut done = false;
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui.button(tr("Defaults")).clicked() { self.st = Settings { recent: self.st.recent.clone(), last_profile: self.st.last_profile.clone(), lang: self.st.lang.clone(), ..Settings::default() } }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| done = Self::ok_row(ui));
-        });
-        done
+        if defaults {
+            let s = &self.st;
+            self.st = Settings {
+                recent: s.recent.clone(), last_profile: s.last_profile.clone(), lang: s.lang.clone(),
+                theme: s.theme, accent: s.accent, pad_accent: s.pad_accent, backdrop: s.backdrop, opacity: s.opacity, dock: s.dock, smart_docking: s.smart_docking, tray_variant: s.tray_variant, motion: s.motion, size: s.size,
+                ..Settings::default()
+            }
+        }
     }
 
     fn set_lang(&mut self, ctx: &egui::Context, l: usize) {
@@ -1905,10 +2561,10 @@ impl App {
             ui.set_width(400.0);
             ui.vertical_centered(|ui| {
                 ui.add_space(4.0);
-                ui.label(RichText::new(i18n::tr_in(id, "Change language?")).font(mono(19.0)).color(c.acc));
+                ui.label(RichText::new(i18n::tr_in(id, "Change language?")).size(20.0));
                 ui.label(RichText::new("Change language?").small().color(c.weak));
                 ui.add_space(10.0);
-                let big = egui::Button::new(RichText::new(i18n::native(id)).size(17.0).color(Color32::BLACK)).fill(c.acc).min_size(vec2(260.0, 38.0));
+                let big = egui::Button::new(RichText::new(i18n::native(id)).size(17.0).color(Color32::WHITE)).fill(c.acc).min_size(vec2(260.0, 38.0));
                 if ui.add(big).clicked() { pick = Some(id) }
                 if ui.add(egui::Button::new(i18n::tr_in(id, "Keep English")).min_size(vec2(260.0, 30.0))).clicked() { pick = Some(0) }
                 ui.add_space(6.0);
@@ -1939,7 +2595,7 @@ impl App {
                 ui.horizontal(|ui| {
                     if ui.button(tr("Later")).clicked() { done = true }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let b = egui::Button::new(RichText::new(tr("Update now")).color(Color32::BLACK)).fill(accent(ui.visuals().dark_mode)).min_size(vec2(110.0, 28.0));
+                        let b = egui::Button::new(RichText::new(tr("Update now")).color(Color32::WHITE)).fill(accent(ui.visuals().dark_mode)).min_size(vec2(110.0, 28.0));
                         if ui.add(b).clicked() { self.install_update(r.clone()) }
                     });
                 });
@@ -1975,11 +2631,11 @@ impl App {
     }
 
     fn dlg_about(&mut self, ui: &mut egui::Ui) -> bool {
-        ui.label(RichText::new(format!("padmimic {}", env!("CARGO_PKG_VERSION"))).strong());
+        ui.label(RichText::new(format!("padmimic {}", env!("CARGO_PKG_VERSION"))).font(bold(16.0)));
         ui.label(tr("Controller, keyboard & mouse → keyboard, mouse and a virtual Xbox 360 controller."));
         ui.weak(tr("Mapping logic (slots, turbo, sets, zones, curves) modelled on AntiMicroX."));
         ui.weak(tr("Open source under the MIT License."));
-        ui.hyperlink_to(format!("github.com/{}", update::REPO), format!("https://github.com/{}", update::REPO));
+        if let Some(url) = update::repository_url() { ui.hyperlink_to("GitHub", url); }
         Self::ok_row(ui)
     }
 
@@ -1991,7 +2647,7 @@ impl App {
             egui::ViewportBuilder::default().with_title(format!("padmimic · {}", tr("Latency meter"))).with_inner_size([600.0, 380.0]).with_min_inner_size([460.0, 300.0]).with_decorations(false),
             |vui, _| {
                 let ctx = vui.ctx().clone();
-                window_edges(&ctx);
+                window_edges(&ctx, false);
                 let c = pal(ctx.theme() == Theme::Dark);
                 egui::CentralPanel::default().frame(egui::Frame::new().fill(c.panel).inner_margin(14)).show(vui, |ui| {
                     // own small title bar: drag anywhere on it, close on the right
@@ -1999,7 +2655,7 @@ impl App {
                     let bar = ui.interact(row, ui.id().with("latbar"), Sense::click_and_drag());
                     if bar.drag_started_by(egui::PointerButton::Primary) { ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag) }
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(tr("Latency meter").to_uppercase()).font(mono(15.0)).color(c.acc));
+                        ui.label(RichText::new(tr("Latency meter")).font(bold(18.0)));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if win_btn(ui, WinBtn::Close) { open = false }
                         });
@@ -2089,6 +2745,141 @@ impl App {
     }
 }
 
+// ================================================================= settings parts
+
+const SETTINGS_TITLE: &str = "padmimic settings";
+const SIDE_W: f32 = 440.0;
+const SIDE_GAP: f32 = 10.0;
+const SET_PAGES: [(Icon, &str); 7] = [
+    (Icon::Palette, "Appearance"), (Icon::Sliders, "General"), (Icon::Globe, "Language"),
+    (Icon::Apps, "Auto profile"), (Icon::Mouse, "Mouse"), (Icon::Chip, "Engine"),
+    (Icon::Pad, "Controller overlay"),
+];
+
+/// Grouped block of settings rows on a rounded card.
+fn group<R>(ui: &mut egui::Ui, f: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let c = pal(ui.visuals().dark_mode);
+    let r = egui::Frame::new().fill(c.card).corner_radius(18).inner_margin(egui::Margin::symmetric(16, 10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        f(ui)
+    });
+    ui.add_space(6.0);
+    r.inner
+}
+
+/// Small heading above a group.
+fn caption(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(8.0);
+    ui.label(RichText::new(text).font(bold(13.0)).color(pal(ui.visuals().dark_mode).weak));
+}
+
+/// Coloured dots; the chosen one gets a ring and a check, hovering grows a dot a little.
+fn accent_picker(ui: &mut egui::Ui, sel: &mut u8) {
+    let c = pal(ui.visuals().dark_mode);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        for (i, (name, rgb)) in ACCENTS.iter().enumerate() {
+            let (r, resp) = ui.allocate_exact_size(vec2(40.0, 44.0), Sense::click());
+            let col = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+            let h = anim(ui.ctx(), resp.id, resp.hovered(), 0.12);
+            let on = *sel as usize == i;
+            let o = anim(ui.ctx(), resp.id.with("on"), on, 0.2);
+            let p = ui.painter();
+            p.circle_filled(r.center(), 14.0 + 2.0 * h, col);
+            if o > 0.0 {
+                p.circle_stroke(r.center(), 18.5 + 2.0 * h, Stroke::new(2.0, col.gamma_multiply(o)));
+                icons::draw(p, Icon::Check, Rect::from_center_size(r.center(), vec2(16.0 * o, 16.0 * o)), Color32::WHITE);
+            }
+            let _ = c;
+            if resp.on_hover_text(tr(name)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { *sel = i as u8 }
+        }
+    });
+}
+
+/// Background choice as small window previews.
+fn backdrop_picker(ui: &mut egui::Ui, sel: &mut u8) {
+    let c = pal(ui.visuals().dark_mode);
+    let dark = ui.visuals().dark_mode;
+    let names = ["Solid", "Aurora", "Mica", "Acrylic"];
+    let gap = 10.0;
+    let cols = if ui.available_width() > 420.0 { 4 } else { 2 };
+    let w = (ui.available_width() - gap * (cols - 1) as f32) / cols as f32;
+    let t = ui.input(|i| i.time) as f32;
+    egui::Grid::new("backdrops").spacing([gap, gap]).show(ui, |ui| {
+        for (i, name) in names.iter().enumerate() {
+            let (r, resp) = ui.allocate_exact_size(vec2(w, 96.0), Sense::click());
+            let on = *sel as usize == i;
+            let h = anim(ui.ctx(), resp.id, resp.hovered(), 0.12);
+            let p = ui.painter();
+            let prev = Rect::from_min_max(r.min, Pos2::new(r.right(), r.bottom() - 24.0)).shrink(2.0);
+            let base = if dark { Color32::from_rgb(10, 10, 12) } else { Color32::from_rgb(240, 241, 244) };
+            p.rect_filled(prev, 12.0, base);
+            let clip = p.with_clip_rect(prev.shrink(1.0));
+            match i {
+                1 => aurora(&clip, prev, t, c.acc, dark),
+                2 => { // mica: wallpaper colour washed into the surface
+                    clip.rect_filled(prev, 12.0, c.acc.gamma_multiply(0.18));
+                    clip.circle_filled(prev.left_top() + vec2(10.0, 8.0), prev.width() * 0.6, Color32::from_rgb(120, 90, 200).gamma_multiply(0.18));
+                }
+                3 => { // acrylic: blurred shapes behind frosted glass
+                    for (k, col) in [(0.0, Color32::from_rgb(255, 120, 80)), (1.0, Color32::from_rgb(60, 160, 255)), (2.0, Color32::from_rgb(80, 220, 140))] {
+                        clip.circle_filled(prev.left_center() + vec2(prev.width() * (0.2 + 0.3 * k), (k - 1.0) * 10.0), 22.0, col.gamma_multiply(0.55));
+                    }
+                    clip.rect_filled(prev, 12.0, if dark { Color32::from_black_alpha(110) } else { Color32::from_white_alpha(110) });
+                }
+                _ => {}
+            }
+            // a tiny window on top: sidebar + two cards
+            let win = prev.shrink2(vec2(prev.width() * 0.16, 14.0));
+            let glass = if i == 0 { 1.0 } else { 0.55 };
+            let card = if dark { Color32::from_rgb(28, 30, 34) } else { Color32::WHITE };
+            clip.rect_filled(win, 6.0, card.gamma_multiply(glass));
+            clip.rect_filled(Rect::from_min_size(win.min + vec2(5.0, 5.0), vec2(win.width() * 0.22, win.height() - 10.0)), 3.0, c.acc.gamma_multiply(0.5));
+            clip.rect_filled(Rect::from_min_size(win.min + vec2(win.width() * 0.3, 5.0), vec2(win.width() * 0.64, 8.0)), 3.0, c.weak.gamma_multiply(0.5));
+            p.rect_stroke(prev, 12.0, Stroke::new(if on { 2.0 } else { 1.0 }, if on { c.acc } else { c.line.lerp_to_gamma(c.weak, h) }), StrokeKind::Outside);
+            p.text(Pos2::new(r.center().x, r.bottom() - 10.0), Align2::CENTER_CENTER, tr(name), if on { bold(13.0) } else { FontId::proportional(13.0) }, if on { c.text } else { c.weak });
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { *sel = i as u8 }
+            if i % cols == cols - 1 { ui.end_row() }
+        }
+    });
+    if *sel == 1 && motion() { ui.ctx().request_repaint_after(FRAME_60) }
+}
+
+/// Coloured call to action in the sidebar (update, driver).
+fn banner(ui: &mut egui::Ui, icon: Icon, text: &str, col: Color32) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+    let h = anim(ui.ctx(), resp.id, resp.hovered(), 0.12);
+    let p = ui.painter();
+    p.rect_filled(r, 22.0, col.gamma_multiply(0.18 + 0.1 * h));
+    icons::draw(p, icon, Rect::from_center_size(Pos2::new(r.left() + 24.0, r.center().y), vec2(18.0, 18.0)), col);
+    p.text(Pos2::new(r.left() + 42.0, r.center().y), Align2::LEFT_CENTER, text, bold(13.5), col);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Aurora: a few large soft colour clouds drifting slowly, tinted by the accent.
+pub(crate) fn aurora(p: &egui::Painter, r: Rect, t: f32, acc: Color32, dark: bool) {
+    p.rect_filled(r, 0.0, if dark { Color32::from_rgb(4, 4, 8) } else { Color32::from_rgb(246, 246, 250) });
+    let mix = |o: Color32, k: f32| acc.lerp_to_gamma(o, k);
+    let cols = [acc, mix(Color32::from_rgb(255, 70, 160), 0.6), mix(Color32::from_rgb(0, 210, 255), 0.6), mix(Color32::from_rgb(120, 70, 255), 0.5)];
+    let big = r.width().max(r.height());
+    for (i, col) in cols.iter().enumerate() {
+        let f = i as f32;
+        let x = r.left() + r.width() * (0.5 + 0.42 * (t * 0.07 * (1.0 + f * 0.31) + f * 1.7).sin());
+        let y = r.top() + r.height() * (0.5 + 0.42 * (t * 0.05 * (1.0 + f * 0.27) + f * 2.3).cos());
+        let rad = big * (0.42 + 0.08 * (t * 0.11 + f).sin());
+        let a = if dark { 0.5 } else { 0.32 };
+        let mut mesh = egui::Mesh::default();
+        mesh.colored_vertex(Pos2::new(x, y), col.gamma_multiply(a));
+        let n = 48u32;
+        for k in 0..n {
+            let ang = k as f32 / n as f32 * std::f32::consts::TAU;
+            mesh.colored_vertex(Pos2::new(x + ang.cos() * rad, y + ang.sin() * rad), Color32::TRANSPARENT);
+            mesh.add_triangle(0, 1 + k, 1 + (k + 1) % n);
+        }
+        p.add(Shape::mesh(mesh));
+    }
+}
+
 fn set_label(names: &[String; 8], i: usize) -> String {
     if names[i].is_empty() { format!("{} {}", tr("Set"), i + 1) } else { format!("{} {} ({})", tr("Set"), i + 1, names[i]) }
 }
@@ -2112,47 +2903,97 @@ fn slot_help(s: &Slot) -> (&'static str, ()) {
 }
 
 impl eframe::App for App {
+    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4] // the window is transparent: Mica / Acrylic or our own background shows through
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.frame_pacer.wait(ctx.cumulative_frame_nr());
+        if !self.taskbar_icon_applied && ctx.cumulative_frame_nr() >= 2 {
+            self.taskbar_icon_applied = crate::tray::apply_taskbar_icon();
+        }
+        self.controller_overlay.poll(&mut self.st.overlay);
         self.capture();
         self.background();
+        self.look(&ctx);
         let on = self.s.on.load(Relaxed);
         // while the game has focus nobody watches this window at 60 fps: its CPU/GPU time belongs to the game
-        let focused = ui.ctx().input(|i| i.viewport().focused.unwrap_or(true));
-        let ms = if self.cap.is_some() || !self.dlgs.is_empty() { 16 } else if on || self.show_live { if focused { 16 } else { 100 } } else { 250 };
-        ui.ctx().request_repaint_after(Duration::from_millis(ms));
-        window_edges(ui.ctx());
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let frame_delay = if self.settings_open || self.cap.is_some() || !self.dlgs.is_empty() || (focused && (on || self.show_live || (self.aurora_on() && motion()))) {
+            FRAME_60
+        } else if on || self.show_live {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_millis(250)
+        };
+        ctx.request_repaint_after(frame_delay);
+        // Windows' own maximize (snap to the top edge, Win+Up) drops Mica / Acrylic: use ours instead
+        let (os_max, outer) = ctx.input(|i| (i.viewport().maximized == Some(true), i.viewport().outer_rect));
+        if os_max {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+            if self.restore.is_none() { self.toggle_max(&ctx) }
+        } else if self.restore.is_none() { self.normal = outer }
+        window_edges(&ctx, self.restore.is_some());
         let active = self.s.live.lock().unwrap().active.clone();
+        if std::mem::take(&mut self.show_settings) { self.toggle_settings(&ctx) }
 
-        let bar = egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 10));
-        egui::Panel::top("top").frame(bar).show(ui, |ui| {
-            self.header(ui);
-            self.profile_bar(ui);
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Controller, format!("🎮 {}", tr("Controller")));
-                ui.selectable_value(&mut self.tab, Tab::Kbm, format!("⌨ {}", tr("Keyboard & mouse")));
-                if self.tab == Tab::Controller {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.checkbox(&mut self.show_live, tr("Live view")); });
+        let dark = ctx.theme() == Theme::Dark;
+        let c = pal(dark);
+        let full = ctx.content_rect();
+        if self.aurora_on() { aurora(&ctx.layer_painter(egui::LayerId::background()), full, ctx.input(|i| i.time) as f32, c.acc, dark) }
+        let compact = full.width() < 920.0;
+        egui::Panel::left("side").exact_size(if compact { 84.0 } else { 268.0 }).resizable(false).show_separator_line(true)
+            .frame(egui::Frame::new().fill(c.side).inner_margin(egui::Margin { left: 14, right: 14, top: SIDEBAR_TOP, bottom: 14 }))
+            .show(ui, |ui| self.sidebar(ui, compact));
+        let bar = egui::Frame::new().fill(c.panel).inner_margin(egui::Margin { left: 24, right: 8, top: TITLE_BAR_TOP, bottom: 6 });
+        egui::Panel::top("top").frame(bar).show_separator_line(false).show(ui, |ui| self.top_bar(ui));
+        egui::Panel::bottom("bottom").frame(egui::Frame::new().fill(c.panel).inner_margin(egui::Margin::symmetric(24, 8))).show_separator_line(false).show(ui, |ui| self.status_bar(ui));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(c.panel).inner_margin(egui::Margin { left: 24, right: 20, top: 6, bottom: 4 })).show(ui, |ui| {
+            // page change: the new page fades in and rises into place
+            let t = if motion() { ease(self.page_t.elapsed().as_secs_f32() / 0.36) } else { 1.0 };
+            if t < 1.0 { ctx.request_repaint() }
+            let rise = (1.0 - t) * 28.0;
+            ui.set_opacity(t);
+            match self.tab {
+                Tab::Settings => {
+                    ui.add_space(rise);
+                    let narrow = ui.available_width() < 700.0;
+                    self.settings_view(ui, narrow)
                 }
-            });
+                tab => {
+                    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                        ui.add_space(rise);
+                        match tab { Tab::Controller => self.controller_tab(ui, &active), Tab::Custom => self.custom_tab(ui), _ => self.kbm_tab(ui, &active) }
+                    });
+                }
+            }
         });
-        egui::Panel::bottom("bottom").frame(bar).show(ui, |ui| self.bottom(ui));
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(14, 2))).show(ui, |ui| {
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match self.tab {
-                Tab::Controller => self.controller_tab(ui, &active),
-                Tab::Kbm => self.kbm_tab(ui, &active),
-            });
-        });
-        let ctx = ui.ctx().clone();
+        self.settings_side(&ctx);
         self.dialogs(&ctx);
         self.lang_prompt(&ctx);
+        self.overlays(&ctx);
+        // start screen: the mark draws in the middle, then everything fades in from behind it
+        if motion() {
+            let t = self.launched.get_or_insert_with(Instant::now).elapsed().as_secs_f32();
+            let bg = if dark { Color32::from_rgb(13, 13, 18) } else { Color32::from_rgb(246, 246, 250) };
+            let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("splash")));
+            if crate::brand::splash(&p, full, bg, c.text, t) { ctx.request_repaint() }
+        }
+        if self.st.overlay.enabled && !self.skins_loaded { self.reload_skins(&ctx); }
+        let overlay_skin = self.skins.iter().find(|s| s.id == self.st.pad_skin).cloned();
+        self.controller_overlay.show(&ctx, &self.st.overlay, self.s.clone(), overlay_skin);
         if matches!(*self.upd.lock().unwrap(), Upd::Restarting) { ctx.send_viewport_cmd(egui::ViewportCommand::Close) }
         self.sync();
+        #[cfg(debug_assertions)]
+        crate::pad::dev_snapshot(&ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(prev) = self.epp_prev.take() { winio::set_pointer_precision(prev); }
         self.s.on.store(false, Relaxed);
         std::thread::sleep(Duration::from_millis(20)); // let the engine release held keys
+        self.controller_overlay.poll(&mut self.st.overlay);
         self.st.save();
     }
 }

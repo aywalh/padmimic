@@ -53,7 +53,13 @@ pub unsafe extern "system" fn mouse_hook(code: i32, w: WPARAM, l: LPARAM) -> LRE
             _ => None,
         };
         if let (true, Some((vk, d))) = (code == HC_ACTION as i32 && m.flags & LLMHF_INJECTED == 0, ev) {
-            if hook_key(vk, d) { return 1 }
+            let target = WindowFromPoint(m.pt);
+            let mut target_pid = 0;
+            GetWindowThreadProcessId(target, &mut target_pid);
+            if target_pid == GetCurrentProcessId() {
+                // Record physical state but never block clicks meant for any of our windows.
+                DOWN[vk as usize].store(d, Relaxed);
+            } else if hook_key(vk, d) { return 1 }
         }
         CallNextHookEx(ptr::null_mut(), code, w, l)
     }
@@ -244,4 +250,147 @@ pub fn set_startup_for(on: bool, exe: &std::path::Path) {
         c.args(["delete", key, "/v", "padmimic", "/f"]);
     }
     let _ = c.creation_flags(0x0800_0000).output(); // CREATE_NO_WINDOW
+}
+
+/// Top-level window of this process with exactly this title (the app can have several viewports).
+pub fn own_window(title: &str) -> Option<windows_sys::Win32::Foundation::HWND> {
+    struct Find { pid: u32, title: Vec<u16>, hit: windows_sys::Win32::Foundation::HWND }
+    unsafe extern "system" fn each(h: windows_sys::Win32::Foundation::HWND, l: LPARAM) -> windows_sys::core::BOOL {
+        unsafe {
+            let f = &mut *(l as *mut Find);
+            let mut pid = 0;
+            GetWindowThreadProcessId(h, &mut pid);
+            let mut buf = [0u16; 256];
+            let n = GetWindowTextW(h, buf.as_mut_ptr(), 256).max(0) as usize;
+            if pid == f.pid && buf[..n] == f.title[..] { f.hit = h; return 0 }
+            1
+        }
+    }
+    let mut f = Find { pid: unsafe { GetCurrentProcessId() }, title: title.encode_utf16().collect(), hit: ptr::null_mut() };
+    unsafe { EnumWindows(Some(each), &mut f as *mut Find as LPARAM) };
+    (!f.hit.is_null()).then_some(f.hit)
+}
+
+/// Windows 11 material behind a window: 0 none, 2 Mica, 3 Acrylic, 4 Mica Alt (DWM_SYSTEMBACKDROP_TYPE).
+/// The window must be transparent (egui clears with alpha 0) for it to show. False on Windows 10.
+pub fn set_backdrop(title: &str, kind: i32, dark: bool) -> bool {
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
+    use windows_sys::Win32::UI::Controls::MARGINS;
+    let Some(h) = own_window(title) else { return false };
+    unsafe {
+        let d: i32 = dark as i32;
+        DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE as u32, &d as *const i32 as *const _, 4);
+        // glass over the whole client area, extended from the bottom edge: a top (caption) margin would make
+        // DWM draw its own minimize / maximize / close buttons behind ours
+        let m = MARGINS { cxLeftWidth: 0, cxRightWidth: 0, cyTopHeight: 0, cyBottomHeight: if kind == 0 { 0 } else { 32767 } };
+        DwmExtendFrameIntoClientArea(h, &m);
+        DwmSetWindowAttribute(h, DWMWA_SYSTEMBACKDROP_TYPE as u32, &kind as *const i32 as *const _, 4) >= 0
+    }
+}
+
+/// Work area (screen minus taskbar) of the monitor at this physical point: left, top, right, bottom.
+pub fn work_area(x: i32, y: i32) -> (i32, i32, i32, i32) {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint};
+    unsafe {
+        let mut mi: MONITORINFO = mem::zeroed();
+        mi.cbSize = mem::size_of::<MONITORINFO>() as u32;
+        GetMonitorInfoW(MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST), &mut mi);
+        let r = mi.rcWork;
+        let m = mi.rcMonitor;
+        // a window covering the whole monitor (auto-hidden taskbar) counts as fullscreen for DWM,
+        // which then drops Mica / Acrylic: stay one pixel short of it
+        let full = (r.left, r.top, r.right, r.bottom) == (m.left, m.top, m.right, m.bottom);
+        (r.left, r.top, r.right, r.bottom - full as i32)
+    }
+}
+
+/// Windows 11: round corners for a frameless window of this process (no-op on Windows 10).
+pub fn round_corners(title: &str) {
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute};
+    if let Some(h) = own_window(title) {
+        let v = DWMWCP_ROUND;
+        unsafe { DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE as u32, &v as *const _ as *const _, 4) };
+    }
+}
+
+/// Work areas of all active monitors; screen gaps and taskbars are excluded.
+pub fn monitor_work_areas() -> Vec<(i32, i32, i32, i32)> {
+    use windows_sys::Win32::Graphics::Gdi::*;
+    unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut windows_sys::Win32::Foundation::RECT, data: LPARAM) -> windows_sys::core::BOOL {
+        unsafe {
+            let areas = &mut *(data as *mut Vec<(i32, i32, i32, i32)>);
+            let mut info: MONITORINFO = mem::zeroed();
+            info.cbSize = mem::size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(monitor, &mut info) != 0 {
+                let r = info.rcWork;
+                areas.push((r.left, r.top, r.right, r.bottom));
+            }
+            1
+        }
+    }
+    let mut areas = vec![];
+    unsafe { EnumDisplayMonitors(ptr::null_mut(), ptr::null(), Some(each), &mut areas as *mut _ as LPARAM); }
+    areas
+}
+
+/// Route clicks through empty artwork pixels without changing the DWM surface shape.
+pub fn overlay_hit_test(title: &str, rectangles: Option<Vec<[i32; 4]>>) -> bool {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Graphics::{Dwm::*, Gdi::ScreenToClient};
+    use windows_sys::core::w;
+    struct HitTest {
+        original: WNDPROC,
+        rectangles: Option<Vec<[i32; 4]>>,
+    }
+    const PROPERTY: *const u16 = w!("PadmimicOverlayHitTest");
+
+    unsafe extern "system" fn hit_test(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+        unsafe {
+            let data = GetPropW(hwnd, PROPERTY).cast::<HitTest>();
+            if data.is_null() { return DefWindowProcW(hwnd, msg, w, l); }
+            let original = (*data).original;
+            if msg == WM_NCDESTROY {
+                RemovePropW(hwnd, PROPERTY);
+                drop(Box::from_raw(data));
+            } else if msg == WM_NCHITTEST {
+                if let Some(rectangles) = &(*data).rectangles {
+                    let mut point = POINT { x: l as i16 as i32, y: (l >> 16) as i16 as i32 };
+                    if ScreenToClient(hwnd, &mut point) != 0 {
+                        let start = rectangles.partition_point(|rect| rect[3] <= point.y);
+                        let hit = rectangles[start..].iter().take_while(|rect| rect[1] <= point.y)
+                            .any(|rect| point.x >= rect[0] && point.x < rect[2]);
+                        if !hit { return HTTRANSPARENT as LRESULT; }
+                    }
+                }
+            }
+            CallWindowProcW(original, hwnd, msg, w, l)
+        }
+    }
+
+    let Some(hwnd) = own_window(title) else { return false };
+    unsafe {
+        let data = GetPropW(hwnd, PROPERTY).cast::<HitTest>();
+        if !data.is_null() {
+            (*data).rectangles = rectangles;
+            return true;
+        }
+        let original = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+        if original == 0 { return false; }
+        let data = Box::into_raw(Box::new(HitTest {
+            original: mem::transmute::<isize, WNDPROC>(original),
+            rectangles,
+        }));
+        if SetPropW(hwnd, PROPERTY, data.cast()) == 0 {
+            drop(Box::from_raw(data));
+            return false;
+        }
+        if SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hit_test as *const () as isize) == 0 {
+            RemovePropW(hwnd, PROPERTY);
+            drop(Box::from_raw(data));
+            return false;
+        }
+        let color = DWMWA_COLOR_NONE;
+        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, (&color as *const u32).cast(), 4);
+    }
+    true
 }

@@ -5,7 +5,7 @@
 //! so the self-update keeps working unchanged.
 
 use crate::i18n::{self, tr, trf};
-use crate::ui::{self, WinBtn, glow, glow_circle, mono, pal};
+use crate::ui::{self, WinBtn, pal};
 use crate::{model, update, winio};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, vec2};
 use std::os::windows::process::CommandExt;
@@ -16,6 +16,8 @@ use vigem_client::{XButtons, XGamepad};
 
 pub const KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\padmimic";
 const TITLE: &str = "padmimic setup";
+/// Everything a quarter smaller than laid out (the app itself defaults to a third smaller).
+const ZOOM: f32 = 0.75;
 const NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -170,11 +172,11 @@ fn register(dir: &Path, exe: &Path) -> Result<(), String> {
     let d = dir.display().to_string();
     let size = (std::fs::metadata(exe).map(|m| m.len()).unwrap_or(0) / 1024).to_string();
     let uninstall = format!("\"{e}\" --uninstall");
-    let url = format!("https://github.com/{}", update::REPO);
+    let url = update::repository_url().unwrap_or_default();
     for (name, ty, val) in [
         ("DisplayName", "REG_SZ", "padmimic"),
         ("DisplayVersion", "REG_SZ", env!("CARGO_PKG_VERSION")),
-        ("Publisher", "REG_SZ", "aywalh"),
+        ("Publisher", "REG_SZ", "padmimic"),
         ("DisplayIcon", "REG_SZ", &e),
         ("InstallLocation", "REG_SZ", &d),
         ("UninstallString", "REG_SZ", &uninstall),
@@ -330,34 +332,21 @@ pub fn run(mode: Mode) -> eframe::Result {
         shown: 0.0,
     };
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title(TITLE).with_inner_size([860.0, 480.0])
-            .with_resizable(false).with_maximize_button(false).with_decorations(false),
+        viewport: egui::ViewportBuilder::default().with_title(TITLE).with_inner_size([860.0 * ZOOM, 480.0 * ZOOM])
+            .with_resizable(false).with_maximize_button(false).with_decorations(false).with_transparent(true),
         centered: true,
         ..Default::default()
     };
     eframe::run_native(TITLE, opts, Box::new(|cc| {
         ui::style(&cc.egui_ctx);
-        cc.egui_ctx.set_theme(egui::ThemePreference::Dark); // the retro look is a dark one
+        cc.egui_ctx.set_zoom_factor(ZOOM);
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark); // the setup is always dark, like the app's default
         Ok(Box::new(app))
     }))
 }
 
-/// Windows 11: round corners for the frameless window (no-op on Windows 10).
-fn round_corners() {
-    use windows_sys::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute};
-    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
-    let title: Vec<u16> = TITLE.encode_utf16().chain([0]).collect();
-    unsafe {
-        let h = FindWindowW(std::ptr::null(), title.as_ptr());
-        if !h.is_null() {
-            let v = DWMWCP_ROUND;
-            DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE as u32, &v as *const _ as *const _, 4);
-        }
-    }
-}
-
-/// A controller that plays by itself: sticks circle, buttons take turns; amber is padmimic's output.
-fn demo(t: f64, busy: bool) -> (XGamepad, XGamepad) {
+/// A controller that plays by itself: sticks circle, buttons take turns; coral is padmimic's output.
+pub(crate) fn demo(t: f64, busy: bool) -> (XGamepad, XGamepad) {
     let t = t as f32 * if busy { 2.4 } else { 1.0 };
     let s = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
     let seq = [XButtons::A, XButtons::X, XButtons::B, XButtons::Y, XButtons::RB, XButtons::UP, XButtons::RIGHT, XButtons::LB];
@@ -384,76 +373,59 @@ fn demo(t: f64, busy: bool) -> (XGamepad, XGamepad) {
 
 // ---------------------------------------------------------------- widgets
 
-/// Mono for Latin text (the retro look), the UI font for scripts the mono font lacks.
-fn font(text: &str, size: f32) -> FontId {
-    if text.chars().all(|c| (c as u32) < 0x2000 && !matches!(c as u32, 0x0600..=0x06FF)) { mono(size) } else { FontId::proportional(size + 1.0) }
-}
-
 fn primary(ui: &mut egui::Ui, text: &str, col: Color32) -> bool {
-    let label = format!("{}  →", text.to_uppercase());
-    let font = font(&label, 14.0);
-    let w = ui.fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), Color32::BLACK).size().x).max(120.0) + 40.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 40.0), Sense::click());
-    let hot = resp.hovered();
+    let font = ui::bold(14.5);
+    let w = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE).size().x).max(96.0) + 44.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 42.0), Sense::click());
     let p = ui.painter();
-    glow(p, rect, 5.0, col.gamma_multiply(if hot { 1.0 } else { 0.55 }));
-    p.rect_filled(rect, 5.0, if hot { col } else { col.gamma_multiply(0.88) });
-    p.text(rect.center(), Align2::CENTER_CENTER, label, font, Color32::BLACK);
+    p.rect_filled(rect, 21.0, if resp.hovered() { col.lerp_to_gamma(Color32::WHITE, 0.12) } else { col });
+    p.text(rect.center(), Align2::CENTER_CENTER, text, font, Color32::WHITE);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
 fn secondary(ui: &mut egui::Ui, text: &str) -> bool {
     let c = pal(true);
-    let font = font(text, 13.0);
-    let w = ui.fonts_mut(|f| f.layout_no_wrap(text.to_uppercase(), font.clone(), c.text).size().x) + 36.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 40.0), Sense::click());
-    let hot = resp.hovered();
+    let font = ui::bold(14.5);
+    let w = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), c.text).size().x) + 40.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 42.0), Sense::click());
     let p = ui.painter();
-    p.rect_filled(rect, 5.0, if hot { c.hover } else { c.idle });
-    p.rect_stroke(rect, 5.0, Stroke::new(1.0, if hot { c.acc } else { c.line }), StrokeKind::Inside);
-    p.text(rect.center(), Align2::CENTER_CENTER, text.to_uppercase(), font, if hot { c.acc } else { c.text });
+    p.rect_filled(rect, 21.0, if resp.hovered() { c.hover } else { c.idle });
+    p.text(rect.center(), Align2::CENTER_CENTER, text, font, c.text);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
-/// Option row: pill switch, title, hint under it.
+/// Option row: title (and hint under it), pill switch on the right; the whole row is clickable.
 fn toggle(ui: &mut egui::Ui, on: &mut bool, title: &str, hint: &str) {
     let c = pal(true);
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), if hint.is_empty() { 32.0 } else { 46.0 }), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), if hint.is_empty() { 40.0 } else { 52.0 }), Sense::click());
     if resp.clicked() { *on = !*on }
     let t = ui.ctx().animate_bool_responsive(resp.id, *on);
     let p = ui.painter();
-    if resp.hovered() { p.rect_filled(rect, 5.0, c.idle); }
-    let pill = Rect::from_min_size(Pos2::new(rect.left() + 8.0, rect.top() + 7.0), vec2(36.0, 18.0));
-    p.rect_filled(pill, 9.0, c.panel.lerp_to_gamma(c.acc.gamma_multiply(0.35), t));
-    p.rect_stroke(pill, 9.0, Stroke::new(1.0, if *on { c.acc } else { c.line }), StrokeKind::Inside);
-    let knob = Pos2::new(egui::lerp(pill.left() + 9.0..=pill.right() - 9.0, t), pill.center().y);
-    if *on { glow_circle(p, knob, 5.5, c.acc.gamma_multiply(t)) }
-    p.circle_filled(knob, 5.5, c.weak.lerp_to_gamma(c.acc, t));
-    let x = pill.right() + 14.0;
-    p.text(Pos2::new(x, pill.center().y), Align2::LEFT_CENTER, title, FontId::proportional(14.5), c.text);
-    if !hint.is_empty() { p.text(Pos2::new(x, pill.center().y + 18.0), Align2::LEFT_CENTER, hint, FontId::proportional(11.5), c.weak); }
+    if resp.hovered() { p.rect_filled(rect, 10.0, c.idle); }
+    let pill = Rect::from_min_size(Pos2::new(rect.right() - 54.0, rect.center().y - 12.0), vec2(44.0, 24.0));
+    p.rect_filled(pill, 12.0, c.hover.lerp_to_gamma(c.acc, t));
+    p.circle_filled(Pos2::new(egui::lerp(pill.left() + 12.0..=pill.right() - 12.0, t), pill.center().y), 9.0, Color32::WHITE);
+    let x = rect.left() + 10.0;
+    let y = if hint.is_empty() { rect.center().y } else { rect.center().y - 9.0 };
+    p.text(Pos2::new(x, y), Align2::LEFT_CENTER, title, FontId::proportional(14.5), c.text);
+    if !hint.is_empty() { p.text(Pos2::new(x, y + 19.0), Align2::LEFT_CENTER, hint, FontId::proportional(11.5), c.weak); }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand);
 }
 
 fn kicker(ui: &mut egui::Ui, text: &str) {
-    let c = pal(true);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        ui.label(RichText::new("▌").font(mono(12.0)).color(c.acc));
-        ui.label(RichText::new(text.to_uppercase()).font(font(text, 11.5)).color(c.weak));
-    });
+    ui.label(RichText::new(text).font(ui::bold(13.0)).color(pal(true).acc));
 }
 
 fn headline(ui: &mut egui::Ui, text: &str, col: Color32) {
-    ui.label(RichText::new(text).size(25.0).strong().color(col));
+    ui.label(RichText::new(text).font(ui::bold(23.0)).color(col));
 }
 
 fn info_row(ui: &mut egui::Ui, key: &str, val: &str) {
     let c = pal(true);
     ui.horizontal(|ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(96.0, 16.0), Sense::hover());
-        ui.painter().text(r.left_center(), Align2::LEFT_CENTER, key.to_uppercase(), font(key, 10.5), c.weak);
-        ui.label(RichText::new(val).font(font(val, 12.0)).color(c.text));
+        let (r, _) = ui.allocate_exact_size(vec2(96.0, 18.0), Sense::hover());
+        ui.painter().text(r.left_center(), Align2::LEFT_CENTER, key, FontId::proportional(12.5), c.weak);
+        ui.label(RichText::new(val).size(12.5).color(c.text));
     });
 }
 
@@ -466,52 +438,35 @@ impl Setup {
         std::thread::spawn(move || run_job(mode, o, job, ctx));
     }
 
-    fn backdrop(&self, p: &egui::Painter, r: Rect, t: f64) {
-        let c = pal(true);
-        p.rect_filled(r, 0.0, c.panel);
-        // soft cyan bloom behind the controller, breathing slowly
-        let bloom = Pos2::new(r.right() - 218.0, r.top() + 230.0);
-        let pulse = 0.85 + 0.15 * (t * 0.8).sin() as f32;
-        for i in (1..=14).rev() {
-            p.circle_filled(bloom, i as f32 * 22.0, c.acc.gamma_multiply(0.006 * pulse));
-        }
-        let mut x = r.left();
-        while x < r.right() { p.vline(x, r.y_range(), Stroke::new(1.0, c.line.gamma_multiply(0.22))); x += 40.0 }
-        let mut y = r.top();
-        while y < r.bottom() { p.hline(r.x_range(), y, Stroke::new(1.0, c.line.gamma_multiply(0.22))); y += 40.0 }
-        // CRT scanlines and one slow bright line sweeping down
-        let mut y = r.top();
-        while y < r.bottom() { p.hline(r.x_range(), y, Stroke::new(1.0, Color32::from_black_alpha(46))); y += 3.0 }
-        let sweep = r.top() + ((t * 70.0) % (r.height() as f64 + 160.0)) as f32 - 80.0;
-        for (dy, a) in [(0.0, 0.05), (2.0, 0.03), (4.0, 0.015)] {
-            p.hline(r.x_range(), sweep - dy, Stroke::new(2.0, c.acc.gamma_multiply(a)));
-        }
+    fn backdrop(&self, p: &egui::Painter, r: Rect) {
+        p.rect_filled(r, 0.0, pal(true).panel);
     }
 
-    fn title_bar(&mut self, ui: &mut egui::Ui, r: Rect, t: f64) {
+    fn title_bar(&mut self, ui: &mut egui::Ui, r: Rect) {
         let c = pal(true);
-        let bar = Rect::from_min_size(r.min, vec2(r.width(), 48.0));
+        let bar = Rect::from_min_size(r.min, vec2(r.width(), 56.0));
         let drag = ui.interact(bar, ui.id().with("drag"), Sense::click_and_drag());
         if drag.drag_started_by(egui::PointerButton::Primary) { ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag) }
         let p = ui.painter();
-        let blink = (t * 1.6) as i64 % 2 == 0;
-        let name = p.text(Pos2::new(r.left() + 26.0, bar.center().y), Align2::LEFT_CENTER, format!("PADMIMIC{}", if blink { "█" } else { " " }), mono(19.0), c.acc);
-        let chip = Rect::from_min_size(Pos2::new(name.right() + 10.0, bar.center().y - 10.0), vec2(0.0, 20.0));
-        let label = tr(if self.mode == Mode::Install { "Setup" } else { "Uninstall" }).to_uppercase();
-        let lr = p.text(chip.left_center() + vec2(9.0, 0.0), Align2::LEFT_CENTER, &label, font(&label, 10.5), c.weak);
-        p.rect_stroke(Rect::from_min_max(chip.min, Pos2::new(lr.right() + 9.0, chip.bottom())), 3.0, Stroke::new(1.0, c.line), StrokeKind::Inside);
+        let logo = Rect::from_min_size(Pos2::new(r.left() + 28.0, bar.center().y - 15.0), vec2(30.0, 30.0));
+        crate::icons::logo(p, logo, c.text, 1.0);
+        let name = p.text(Pos2::new(logo.right() + 10.0, bar.center().y), Align2::LEFT_CENTER, "padmimic", ui::bold(18.0), c.text);
+        let label = tr(if self.mode == Mode::Install { "Setup" } else { "Uninstall" });
+        let lr = p.text(Pos2::new(name.right() + 20.0, bar.center().y), Align2::LEFT_CENTER, label, FontId::proportional(12.0), c.weak);
+        p.rect_filled(Rect::from_min_max(Pos2::new(name.right() + 10.0, bar.center().y - 11.0), Pos2::new(lr.right() + 10.0, bar.center().y + 11.0)), 11.0, c.idle);
+        p.text(Pos2::new(name.right() + 20.0, bar.center().y), Align2::LEFT_CENTER, label, FontId::proportional(12.0), c.weak);
         let right = Rect::from_min_max(Pos2::new(r.right() - 330.0, bar.top() + 10.0), Pos2::new(r.right() - 14.0, bar.bottom() - 10.0));
         let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)));
         if ui::win_btn(&mut ui, WinBtn::Close) { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close) }
         if ui::win_btn(&mut ui, WinBtn::Min) { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true)) }
         ui.add_space(6.0);
         if self.page != Page::Work {
-            let b = egui::Button::new(RichText::new(format!("Aあ  {}", i18n::native(i18n::cur()))).font(FontId::proportional(13.0)).color(c.weak)).fill(c.idle);
+            let b = egui::Button::new(RichText::new(format!("Aあ  {}", i18n::native(i18n::cur()))).size(13.0).color(c.text)).fill(c.idle);
             if ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() { self.lang_open = true }
         }
     }
 
-    /// 01 WELCOME — 02 OPTIONS — 03 INSTALL
+    /// (1) Welcome — (2) Options — (3) Install
     fn steps_bar(&self, p: &egui::Painter, left: f32, y: f32) {
         let c = pal(true);
         let names: &[&str] = if self.mode == Mode::Install { &["Welcome", "Options", "Install"] } else { &["Uninstall", "Done"] };
@@ -524,46 +479,38 @@ impl Setup {
         };
         let mut x = left;
         for (i, n) in names.iter().enumerate() {
-            let col = if i == cur { c.acc } else if i < cur { c.acc.gamma_multiply(0.5) } else { c.weak.gamma_multiply(0.7) };
-            let label = format!("{:02} {}", i + 1, tr(n).to_uppercase());
-            let r = p.text(Pos2::new(x, y), Align2::LEFT_CENTER, &label, font(&label, 10.5), col);
-            if i == cur {
-                let u = Rect::from_min_max(Pos2::new(r.left(), r.bottom() + 4.0), Pos2::new(r.right(), r.bottom() + 6.0));
-                glow(p, u, 1.0, c.acc);
-                p.rect_filled(u, 1.0, c.acc);
-            }
+            let dot = Pos2::new(x + 10.0, y);
+            p.circle_filled(dot, 10.0, if i <= cur { c.acc } else { c.idle });
+            p.text(dot, Align2::CENTER_CENTER, format!("{}", i + 1), FontId::proportional(11.5), if i <= cur { Color32::WHITE } else { c.weak });
+            let r = p.text(Pos2::new(dot.x + 18.0, y), Align2::LEFT_CENTER, tr(n), FontId::proportional(13.0), if i == cur { c.text } else { c.weak });
             x = r.right() + 12.0;
             if i + 1 < names.len() {
-                p.hline(x..=x + 26.0, y, Stroke::new(1.0, if i < cur { c.acc.gamma_multiply(0.5) } else { c.line }));
-                x += 38.0;
+                p.hline(x..=x + 28.0, y, Stroke::new(1.5, if i < cur { c.acc } else { c.line }));
+                x += 40.0;
             }
         }
     }
 
     fn demo_panel(&mut self, ui: &mut egui::Ui, r: Rect, t: f64) {
         let c = pal(true);
-        let p = ui.painter();
-        glow(p, r, 8.0, c.acc.gamma_multiply(0.35));
-        p.rect_filled(r, 8.0, c.card.gamma_multiply(0.92));
-        p.rect_stroke(r, 8.0, Stroke::new(1.0, c.acc.gamma_multiply(0.45)), StrokeKind::Inside);
+        ui.painter().rect_filled(r, 22.0, c.card);
         let busy = self.page == Page::Work;
         let (g, v) = if self.page == Page::Done { (XGamepad { buttons: XButtons { raw: XButtons::A }, ..Default::default() }, XGamepad::default()) } else { demo(t, busy) };
         let inner = r.shrink2(vec2(14.0, 30.0)).translate(vec2(0.0, 10.0));
         let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-        ui::controller(&mut cu, &g, Some(&v), &self.sticks, &mut self.trail);
+        ui::controller(&mut cu, (t / 4.0) as u8 % crate::pad::MODELS.len() as u8, &g, Some(&v), &self.sticks, &mut self.trail);
         let p = ui.painter();
-        let live_label = format!("▌ {}", tr("Live preview").to_uppercase());
-        p.text(Pos2::new(r.left() + 16.0, r.top() + 18.0), Align2::LEFT_CENTER, &live_label, font(&live_label, 10.5), c.weak);
-        let dot = Pos2::new(r.right() - 20.0, r.top() + 18.0);
-        let live = (t * 2.0) as i64 % 2 == 0 || busy;
-        if live { glow_circle(p, dot, 3.5, c.acc) }
-        p.circle_filled(dot, 3.5, if live { c.acc } else { c.acc.gamma_multiply(0.3) });
-        let tags = ["8000 Hz", "keys · mouse", "Xbox 360", "MIT"];
-        let mut x = r.left() + 16.0;
-        for tag in tags {
-            let tr_ = p.text(Pos2::new(x + 8.0, r.bottom() - 22.0), Align2::LEFT_CENTER, tag, mono(10.5), c.text.gamma_multiply(0.8));
-            p.rect_stroke(Rect::from_min_max(Pos2::new(x, r.bottom() - 32.0), Pos2::new(tr_.right() + 8.0, r.bottom() - 12.0)), 3.0, Stroke::new(1.0, c.line), StrokeKind::Inside);
-            x = tr_.right() + 16.0;
+        p.text(Pos2::new(r.left() + 18.0, r.top() + 20.0), Align2::LEFT_CENTER, tr("Live preview"), FontId::proportional(12.5), c.weak);
+        let dot = Pos2::new(r.right() - 22.0, r.top() + 20.0);
+        let pulse = if busy { 1.0 } else { 0.55 + 0.45 * (t * 2.5).sin().abs() as f32 };
+        p.circle_filled(dot, 4.0, c.acc.gamma_multiply(pulse));
+        let mut x = r.left() + 18.0;
+        for tag in ["8000 Hz", "keys · mouse", "Xbox 360", "MIT"] {
+            let galley = p.layout_no_wrap(tag.into(), FontId::proportional(11.5), c.weak);
+            let pill = Rect::from_min_size(Pos2::new(x, r.bottom() - 36.0), vec2(galley.size().x + 20.0, 22.0));
+            p.rect_filled(pill, 11.0, c.idle);
+            p.galley(Pos2::new(pill.left() + 10.0, pill.center().y - galley.size().y / 2.0), galley, c.weak);
+            x = pill.right() + 6.0;
         }
     }
 
@@ -589,13 +536,13 @@ impl Setup {
             });
             return;
         }
-        kicker(ui, "controller remapper · windows");
+        kicker(ui, "Controller remapper for Windows");
         ui.add_space(6.0);
         headline(ui, tr("Your controller."), Color32::from_rgb(242, 247, 245));
         headline(ui, tr("Plus keys, mouse & a virtual pad."), c.acc);
         ui.add_space(8.0);
-        ui.label(RichText::new(tr("The real gamepad goes straight to the game – padmimic adds what you map on top. Built for low latency.")).size(14.5).color(c.weak));
-        ui.add_space(16.0);
+        ui.label(RichText::new(tr("The real gamepad goes straight to the game – padmimic adds what you map on top. Built for low latency.")).size(13.5).color(c.weak));
+        ui.add_space(10.0);
         info_row(ui, tr("Install to"), &show_dir(&self.o.dir));
         let v = env!("CARGO_PKG_VERSION");
         let ver = match &self.installed { Some(old) => trf("{} · installed: {}", &[&v, old]), None => v.to_string() };
@@ -624,12 +571,12 @@ impl Setup {
         }
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(tr("Folder").to_uppercase()).font(mono(10.5)).color(c.weak));
-            if ui.add(egui::Label::new(RichText::new(tr("Default")).font(mono(10.5)).color(c.acc)).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            ui.label(RichText::new(tr("Folder")).size(12.5).color(c.weak));
+            if ui.add(egui::Label::new(RichText::new(tr("Default")).size(12.5).color(c.acc)).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.o.dir = default_dir().display().to_string();
             }
         });
-        ui.add(egui::TextEdit::singleline(&mut self.o.dir).font(mono(12.0)).desired_width(f32::INFINITY).margin(vec2(8.0, 7.0)));
+        ui.add(egui::TextEdit::singleline(&mut self.o.dir).font(FontId::proportional(13.0)).desired_width(f32::INFINITY).margin(vec2(10.0, 9.0)));
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.horizontal(|ui| {
                 if primary(ui, tr(if self.installed.is_some() { "Reinstall" } else { "Install" }), c.acc) && !self.o.dir.trim().is_empty() { self.start(&ctx) }
@@ -649,31 +596,25 @@ impl Setup {
         self.shown += (target - self.shown) * 0.12;
         kicker(ui, tr(if self.mode == Mode::Install { "Installing" } else { "Removing" }));
         ui.add_space(2.0);
-        ui.label(RichText::new(format!("{:03}%", (self.shown * 100.0).round() as u32)).font(mono(46.0)).color(c.acc));
-        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
+        ui.label(RichText::new(format!("{}%", (self.shown * 100.0).round() as u32)).font(ui::bold(44.0)).color(c.text));
+        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(bar, 4.0, c.idle);
-        let fill = Rect::from_min_size(bar.min, vec2(bar.width() * self.shown, bar.height()));
-        glow(p, fill, 4.0, c.acc);
-        p.rect_filled(fill, 4.0, c.acc);
-        // sheen running over the filled part
-        let sx = fill.left() + ((t * 220.0) % (fill.width().max(1.0) as f64 + 60.0)) as f32 - 30.0;
-        let sheen = Rect::from_min_max(Pos2::new(sx.max(fill.left()), fill.top()), Pos2::new((sx + 30.0).min(fill.right()), fill.bottom()));
-        if sheen.width() > 0.0 { p.rect_filled(sheen, 4.0, Color32::from_white_alpha(70)); }
+        p.rect_filled(bar, 3.0, c.idle);
+        p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * self.shown, bar.height())), 3.0, c.acc);
         ui.add_space(14.0);
-        let blink = (t * 4.0) as i64 % 2 == 0;
         for (label, st) in &steps {
-            let (icon, col) = match st {
-                St::Wait => ("·", c.weak.gamma_multiply(0.6)),
-                St::Run => (if blink { "■" } else { " " }, c.amber),
-                St::Ok => ("■", c.acc),
-                St::Skip => ("–", c.weak),
-                St::Warn(_) => ("!", c.amber),
-            };
             ui.horizontal(|ui| {
-                ui.label(RichText::new(icon).font(mono(12.5)).color(col));
-                let text_col = if matches!(st, St::Wait) { c.weak } else { c.text };
-                ui.label(RichText::new(tr(label)).font(font(tr(label), 12.5)).color(text_col));
+                // status dot: ring = waiting, pulsing = running, filled = done, coral = warning
+                let (r, _) = ui.allocate_exact_size(vec2(14.0, 18.0), Sense::hover());
+                let (m, p) = (r.center(), ui.painter());
+                match st {
+                    St::Wait | St::Skip => { p.circle_stroke(m, 5.0, Stroke::new(1.5, c.line)); }
+                    St::Run => { p.circle_filled(m, 5.0, c.acc.gamma_multiply(0.45 + 0.55 * (t * 6.0).sin().abs() as f32)); }
+                    St::Ok => { p.circle_filled(m, 5.0, c.acc); }
+                    St::Warn(_) => { p.circle_filled(m, 5.0, c.amber); }
+                }
+                let text_col = if matches!(st, St::Wait | St::Skip) { c.weak } else { c.text };
+                ui.label(RichText::new(tr(label)).size(13.5).color(text_col));
             });
             if let St::Warn(e) = st { ui.label(RichText::new(format!("  {e}")).size(11.5).color(c.amber)); }
         }
@@ -691,7 +632,7 @@ impl Setup {
             ui.add_space(6.0);
             headline(ui, tr("Installation failed"), c.amber);
             ui.add_space(6.0);
-            ui.label(RichText::new(e).font(mono(12.0)).color(c.weak));
+            ui.label(RichText::new(e).size(12.5).color(c.weak));
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 ui.horizontal(|ui| {
                     if primary(ui, tr("Try again"), c.acc) { self.start(&ctx) }
@@ -734,7 +675,7 @@ impl Setup {
         let c = pal(true);
         let r = egui::Modal::new(egui::Id::new("setup_lang")).show(ctx, |ui| {
             ui.set_width(440.0);
-            ui.label(RichText::new(tr("Language").to_uppercase()).font(font(tr("Language"), 13.0)).color(c.acc));
+            ui.label(RichText::new(tr("Language")).font(ui::bold(17.0)).color(c.text));
             ui.add_space(6.0);
             ui::lang_grid(ui, i18n::cur(), &[])
         });
@@ -749,11 +690,19 @@ impl Setup {
 }
 
 impl eframe::App for Setup {
+    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if !self.rounded {
             self.rounded = true;
-            round_corners();
+            crate::winio::round_corners(TITLE);
+            // same glass as the app: Acrylic behind see-through surfaces (solid on Windows 10)
+            let glass = crate::winio::set_backdrop(TITLE, 3, true);
+            ui::set_look(0, if glass { 0.55 } else { 1.0 }, true);
+            ui::apply_colors(&ctx);
             if std::env::var("PADMIMIC_SHOW").is_ok_and(|v| v == "auto") { self.start(&ctx) }
         }
         ctx.request_repaint_after(Duration::from_millis(16)); // the demo controller moves
@@ -761,9 +710,9 @@ impl eframe::App for Setup {
         let t = ctx.input(|i| i.time);
         egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
             let r = ctx.content_rect();
-            self.backdrop(ui.painter(), r, t);
-            self.title_bar(ui, r, t);
-            self.steps_bar(ui.painter(), r.left() + 28.0, r.top() + 70.0);
+            self.backdrop(ui.painter(), r);
+            self.title_bar(ui, r);
+            self.steps_bar(ui.painter(), r.left() + 28.0, r.top() + 76.0);
             let demo = Rect::from_min_max(Pos2::new(r.right() - 408.0, r.top() + 92.0), Pos2::new(r.right() - 28.0, r.bottom() - 28.0));
             self.demo_panel(ui, demo, t);
             let left = Rect::from_min_max(Pos2::new(r.left() + 28.0, r.top() + 104.0), Pos2::new(demo.left() - 36.0, r.bottom() - 28.0));

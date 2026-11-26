@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 290" role="img">
+<title>padmimic — Controller remapping for Windows</title>
+<rect width="1000" height="290" rx="23" fill="#111319"/>
+<rect x="24" y="24" width="952" height="242" rx="18" fill="#171a23" stroke="#303643"/>
+<g transform="translate(59 61)" fill="none" stroke="#f4f5f8" stroke-width="4" stroke-linecap="round">
+<path d="M4 36V20a8 8 0 1 1 8 8H4M42 4v16a8 8 0 1 1-8-8h8"/>
+<path d="M58 7v26" stroke="#8093be" stroke-width="3"/>
+</g>
+<g font-family="Segoe UI, Arial, sans-serif"><text x="136" y="93" fill="#f5f6f8" font-size="38" font-weight="650">padmimic</text>
+<text x="62" y="156" fill="#f5f6f8" font-size="25" font-weight="600">Your controller, mapped your way.</text>
+<text x="63" y="192" fill="#aeb7ca" font-size="16">Windows · Profiles · Live controller overlay</text></g>
+<path d="M782 91h58c31 0 59 20 65 52l7 33c6 28-15 37-31 24l-33-28h-75l-33 28c-16 13-37 4-31-24l7-33c6-32 34-52 66-52Z" fill="#222839" stroke="#52678d" stroke-width="3"/>
+<g fill="none" stroke="#9ab7ff" stroke-width="3" stroke-linecap="round">
+<path d="M754 128v24m-12-12h24"/><circle cx="875" cy="138" r="10"/><circle cx="794" cy="157" r="12"/><circle cx="831" cy="157" r="12"/>
+</g></svg>
