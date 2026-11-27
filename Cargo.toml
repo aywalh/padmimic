@@ -1,6 +1,6 @@
 [package]
 name = "padmimic"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "Controller remapper for Windows: real gamepad to keyboard, mouse and a virtual Xbox 360 controller"
 license = "MIT"

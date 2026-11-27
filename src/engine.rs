@@ -2,7 +2,7 @@
 //! Xbox 360 pad. Runs on one time-critical thread; the UI only swaps in new `Arc<Profile>` / `Arc<Settings>`.
 
 use crate::model::*;
-use crate::winio;
+use crate::{sony_input, winio};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU8, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,7 @@ pub struct Stats {
 pub struct Live {
     pub set: usize,
     pub phys: XGamepad,
+    pub sony: Option<sony_input::Reading>,
     pub out: XGamepad,
     pub active: Vec<Elem>, // virtual buttons currently pressed (raw input)
     pub stats: Stats,
@@ -757,10 +758,13 @@ impl Engine {
     }
 
     /// Turn the real pad + keyboard into virtual button samples, and add analog passthrough to `acc`.
-    fn sample(&mut self, set: &Set, phys: &XGamepad, now: u64, acc: &mut Acc) -> Vec<Sample> {
+    fn sample(&mut self, set: &Set, phys: &XGamepad, sony: u8, now: u64, acc: &mut Acc) -> Vec<Sample> {
         let mut v: Vec<Sample> = Vec::with_capacity(48);
         for (i, o) in PAD_BUTTONS.iter().enumerate() {
             v.push((Elem::Btn(i as u8), phys.buttons.raw & o.bit() != 0, 1.0, false));
+        }
+        for i in 0..2 {
+            v.push((Elem::Sony(i), sony & (1 << i) != 0, 1.0, false));
         }
         let dp = dpad_buttons(set.dpad.mode.unwrap_or(DirMode::Standard), phys.buttons.raw);
         let dp = self.dirs[2].update(dp, set.dpad.delay, now);
@@ -836,7 +840,7 @@ impl Engine {
         // raw mouse only while mouse aim runs (AntiMicro has neither, so idle padmimic must have neither)
         set_inputs(block.contains(&true), on && p.mouse_aim.enabled);
         let mut fx = Frame::default();
-        let samples = self.sample(set, phys, now, &mut fx.pad);
+        let samples = self.sample(set, phys, live.sony.map_or(0, |sample| sample.extra), now, &mut fx.pad);
 
         live.active.clear();
         live.active.extend(samples.iter().filter(|s| s.1).map(|s| s.0));
@@ -1097,7 +1101,17 @@ fn run(s: Arc<Shared>) {
         if hint != slot && scan_t.elapsed() > Duration::from_millis(600) {
             slot = hint;
         }
-        if let Some(i) = slot {
+        let sony = sony_input::current();
+        if let Some(sample) = sony {
+            phys = sample.pad;
+            if sample.packet != last_pkt {
+                pkts += 1;
+                last_pkt = sample.packet;
+                let t = Instant::now();
+                pad_gap = pad_t.map(|p| (t - p).as_secs_f64() * 1e6).filter(|&us| us < 50_000.0);
+                pad_t = Some(t);
+            }
+        } else if let Some(i) = slot {
             match read_xinput(i) {
                 Some((pkt, g)) => {
                     if pkt != last_pkt {
@@ -1123,6 +1137,7 @@ fn run(s: Arc<Shared>) {
         let now = t0.elapsed().as_millis() as u64;
         let g = {
             let mut live = s.live.lock().unwrap();
+            live.sony = sony;
             let g = eng.tick(&p, &st, &phys, on, now, dt_ms, set_cmd, &mut live, &mut events);
             live.phys = phys;
             live.set = eng.set;
@@ -1155,7 +1170,7 @@ fn run(s: Arc<Shared>) {
 
         loops += 1;
         if stat_t.elapsed() >= Duration::from_secs(1) {
-            s.live.lock().unwrap().stats = Stats { loop_hz: loops, pad_hz: pkts, slot, virt_slot: virt };
+            s.live.lock().unwrap().stats = Stats { loop_hz: loops, pad_hz: pkts, slot: if sony.is_none() { slot } else { None }, virt_slot: virt };
             (loops, pkts, stat_t) = (0, 0, Instant::now());
         }
 
@@ -1205,6 +1220,7 @@ fn raw_mouse_thread() {
         let hwnd = CreateWindowExW(0, class, class, 0, 0, 0, 0, 0, HWND_MESSAGE, ptr::null_mut(), hinst, ptr::null());
         // while hooked, every key and click on the system waits for this thread: keep it first in line
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        sony_input::register(hwnd);
         INPUT_HWND.store(hwnd, Relaxed);
         let mut msg = mem::zeroed();
         while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {
@@ -1250,10 +1266,16 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             apply_inputs(h, w);
             return 0;
         }
+        if msg == WM_INPUT_DEVICE_CHANGE && w as u32 == GIDC_REMOVAL {
+            sony_input::removed(l as usize);
+        }
         if msg == WM_INPUT {
             let mut ri: RAWINPUT = mem::zeroed();
             let mut size = mem::size_of::<RAWINPUT>() as u32;
             let got = GetRawInputData(l as HRAWINPUT, RID_INPUT, &mut ri as *mut _ as *mut _, &mut size, mem::size_of::<RAWINPUTHEADER>() as u32);
+            if got == u32::MAX || ri.header.dwType == RIM_TYPEHID {
+                sony_input::raw_input(l as HRAWINPUT);
+            }
             // injected moves (our own spring/cursor output) must not feed back into mouse aim
             if got != u32::MAX && ri.header.dwType == RIM_TYPEMOUSE && !ri.header.hDevice.is_null() && ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE == 0 {
                 DX.fetch_add(ri.data.mouse.lLastX, Relaxed);

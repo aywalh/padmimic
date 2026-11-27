@@ -66,6 +66,22 @@ impl Model {
 
 /// Stable IDs take precedence over the old numeric preference. Legacy Switch Pro falls back
 /// to DualSense because the captured catalog contains no Nintendo artwork.
+pub fn is_auto(id: &str, legacy: u8) -> bool {
+    id == "auto" || (id.is_empty() && legacy == 0)
+}
+
+pub fn live_index(id: &str, legacy: u8, sony: Option<crate::sony_input::Reading>) -> usize {
+    if is_auto(id, legacy) {
+        use crate::sony_input::SonyModel;
+        return match sony.map(|input| input.model) {
+            Some(SonyModel::DualSense) => 1,
+            Some(SonyModel::DualShock4) => 2,
+            None => 0,
+        };
+    }
+    selected_index(id, legacy)
+}
+
 pub fn selected_index(id: &str, legacy: u8) -> usize {
     if let Some(id) = id.strip_prefix("builtin:") {
         return MODELS.iter().position(|m| m.id == id).unwrap_or(1);
@@ -421,8 +437,23 @@ pub(crate) fn overlay_pixels(mi: usize) -> egui::ColorImage { image(MODELS[mi].b
 pub(crate) fn overlay_image_rect(r: Rect) -> Rect { frame(r).2 }
 
 /// Same live artwork and feedback, with no backlight, labels or app background.
-pub(crate) fn paint_overlay(p: &Painter, r: Rect, mi: usize, g: &XGamepad) {
+pub(crate) fn paint_overlay(p: &Painter, r: Rect, mi: usize, g: &XGamepad, extra: u8) {
     paint_controller(p, r, mi, g, None, false);
+    paint_sony_buttons(p, r, mi, extra);
+}
+
+fn paint_sony_buttons(p: &Painter, r: Rect, mi: usize, extra: u8) {
+    if extra == 0 { return; }
+    let model = &MODELS[mi];
+    let (o, k, _) = frame(r);
+    if extra & 1 != 0 {
+        let y = match model.layout { Layout::DualSense => 192., Layout::DualShock => 203., Layout::Xbox => return };
+        let touchpad = Rect::from_center_size(o + vec2(400., y) * k, vec2(122., 48.) * k);
+        p.rect_stroke(touchpad, 8. * k, Stroke::new(1.5, model.color()), egui::StrokeKind::Inside);
+    }
+    if extra & 2 != 0 && matches!(model.layout, Layout::DualSense) {
+        p.rect_filled(Rect::from_center_size(o + vec2(400., 323.) * k, vec2(17., 5.) * k), 2. * k, model.color());
+    }
 }
 
 fn paint_controller(p: &Painter, r: Rect, mi: usize, g: &XGamepad, out: Option<&XGamepad>, backlight: bool) {
@@ -689,7 +720,7 @@ pub(crate) fn controller(
     sticks: &[Stick; 2],
     trail: &mut Trail,
 ) {
-    controller_sized(ui, model, g, out, sticks, trail, 440.);
+    controller_sized(ui, model, g, out, sticks, trail, 440., 0);
 }
 pub(crate) fn controller_sized(
     ui: &mut egui::Ui,
@@ -699,6 +730,7 @@ pub(crate) fn controller_sized(
     sticks: &[Stick; 2],
     trail: &mut Trail,
     maximum_width: f32,
+    sony_extra: u8,
 ) {
     // Production always renders the real input snapshot. Test substitution is debug-only.
     #[cfg(debug_assertions)]
@@ -711,6 +743,7 @@ pub(crate) fn controller_sized(
         ui.allocate_painter(vec2(ui.available_width(), w * ASPECT + 38.), Sense::hover());
     let area = Rect::from_center_size(resp.rect.center() - vec2(0., 19.), vec2(w, w * ASPECT));
     paint(&p, area, mi, g, out);
+    paint_sony_buttons(&p, area, mi, sony_extra);
     let (o, k, _) = frame(area);
     let geo = MODELS[mi].layout.geometry();
     let c = pal(ui.visuals().dark_mode);
@@ -922,7 +955,7 @@ mod tests {
         pressed.buttons.raw = XButtons::LTHUMB | XButtons::RB;
         pressed.right_trigger = 230;
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            paint_overlay(ui.painter(), Rect::from_min_size(Pos2::ZERO, vec2(576., 500.)), 1, &pressed);
+            paint_overlay(ui.painter(), Rect::from_min_size(Pos2::ZERO, vec2(576., 500.)), 1, &pressed, 0);
         });
         assert!(!output.shapes.is_empty());
         assert!(ctx.data_mut(|d| d.get_temp::<TextureHandle>(egui::Id::new("controller-soft-backlight"))).is_none());

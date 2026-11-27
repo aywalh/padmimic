@@ -615,6 +615,7 @@ fn stem(path: &str) -> String {
 
 const INSTALLING: &str = "Installing ViGEmBus…";
 
+const SONY_BUTTON_NAMES: [&str; 2] = ["Touchpad click", "Mute"];
 const BTN_NAMES: [&str; 11] = ["A", "B", "X", "Y", "LB", "RB", "Back", "Start", "Guide", "L3", "R3"];
 const STICK_NAMES: [&str; 2] = ["Left stick", "Right stick"];
 const TRIG_NAMES: [&str; 2] = ["LT", "RT"];
@@ -626,6 +627,7 @@ fn elem_name(p: &Set, e: Elem) -> String {
     }
     match e {
         Elem::Btn(i) => BTN_NAMES[i as usize].into(),
+        Elem::Sony(i) => tr(SONY_BUTTON_NAMES[i as usize]).into(),
         Elem::DPad(d) => format!("D-Pad {}", DIRS[d as usize]),
         Elem::Stick(s, d) => format!("{} {}", tr(STICK_NAMES[s as usize]), DIRS[d as usize]),
         Elem::StickMod(s) => format!("{} {}", tr(STICK_NAMES[s as usize]), tr("Modifier")),
@@ -1534,7 +1536,7 @@ impl App {
     /// Theme, accent, glass and the Windows material, applied whenever one of them changes.
     fn look(&mut self, ctx: &egui::Context) {
         let automatic = self.st.pad_accent && (self.st.pad_skin.is_empty() || self.st.pad_skin.starts_with("builtin:"));
-        let color = automatic.then(|| crate::pad::MODELS[crate::pad::selected_index(&self.st.pad_skin,self.st.pad_model)].accent());
+        let color = automatic.then(|| crate::pad::MODELS[crate::pad::live_index(&self.st.pad_skin, self.st.pad_model, self.s.live.lock().unwrap().sony)].accent());
         let color_changed = set_design_accent(color);
         let key = (self.st.theme, self.st.accent, self.st.backdrop, (self.st.opacity * 100.0) as u32, self.st.motion, self.st.size);
         if (self.look_sent == Some(key) && !color_changed) || ctx.cumulative_frame_nr() < 2 { return }
@@ -1622,9 +1624,15 @@ impl App {
     }
 
     fn controller_tab(&mut self, ui: &mut egui::Ui, active: &[Elem]) {
-        let (phys, out, vigem, hz) = { let l = self.s.live.lock().unwrap(); (l.phys, l.out, l.vigem, l.stats.pad_hz) };
+        let (phys, out, vigem, hz, sony) = { let l = self.s.live.lock().unwrap(); (l.phys, l.out, l.vigem, l.stats.pad_hz, l.sony) };
+        let controller = sony.map_or("", |sample| match (sample.model, sample.bluetooth) {
+            (crate::sony_input::SonyModel::DualShock4, false) => " · DualShock 4 · USB",
+            (crate::sony_input::SonyModel::DualShock4, true) => " · DualShock 4 · Bluetooth",
+            (crate::sony_input::SonyModel::DualSense, false) => " · DualSense · USB",
+            (crate::sony_input::SonyModel::DualSense, true) => " · DualSense · Bluetooth",
+        });
         if self.show_live {
-            card(ui, &format!("{} · {hz} {}", tr("Live"), tr("upd/s")), |ui| self.live_view(ui, &phys, vigem.then_some(&out)));
+            card(ui, &format!("{} · {hz} {}{controller}", tr("Live"), tr("upd/s")), |ui| self.live_view(ui, &phys, vigem.then_some(&out)));
             ui.add_space(12.0);
         }
         let full = ui.available_width();
@@ -1684,6 +1692,11 @@ impl App {
                                             self.btn_cell(ui, Elem::Btn(i), BTN_NAMES[i as usize], vec2(w, 50.0), active);
                                             if i % 3 == 2 { ui.end_row() }
                                         }
+                                        let extras = if sony.is_some_and(|s| s.model == crate::sony_input::SonyModel::DualShock4) { 1 } else { 2 };
+                                        for i in 0..extras {
+                                            self.btn_cell(ui, Elem::Sony(i), tr(SONY_BUTTON_NAMES[i as usize]), vec2(w, 50.0), active);
+                                            if i == 0 { ui.end_row() }
+                                        }
                                     });
                                 });
                             }
@@ -1697,6 +1710,7 @@ impl App {
 
     /// The chosen controller live: an own skin from skins/, else the built-in model.
     fn live_view(&mut self, ui: &mut egui::Ui, phys: &XGamepad, out: Option<&XGamepad>) {
+        let sony = self.s.live.lock().unwrap().sony;
         if !self.skins_loaded { self.reload_skins(ui.ctx()) }
         if self.tab == Tab::Controller {
             // pop the controller out into its own overlay window, or back in
@@ -1714,7 +1728,7 @@ impl App {
             s.paint(ui.painter(), Rect::from_center_size(r.center(), vec2(w, hgt)), phys);
         } else {
             let sticks = self.p.sets[self.cur()].sticks.clone();
-            crate::pad::controller_sized(ui, crate::pad::selected_index(&self.st.pad_skin, self.st.pad_model) as u8, phys, out, &sticks, &mut self.trail, if self.tab == Tab::Custom { 300.0 } else { 440.0 });
+            crate::pad::controller_sized(ui, crate::pad::live_index(&self.st.pad_skin, self.st.pad_model, sony) as u8, phys, out, &sticks, &mut self.trail, if self.tab == Tab::Custom { 300.0 } else { 440.0 }, sony.map_or(0, |sample| sample.extra));
         }
     }
 
@@ -1730,10 +1744,15 @@ impl App {
         let (phys, out, vigem) = { let l = self.s.live.lock().unwrap(); (l.phys, l.out, l.vigem) };
         let c = pal(ui.visuals().dark_mode);
         if !self.skins_loaded { self.reload_skins(ui.ctx()) }
-        let title = self.skins.iter().find(|s| s.id == self.st.pad_skin).map(|s| s.name.clone()).unwrap_or_else(|| MODELS[pad::selected_index(&self.st.pad_skin, self.st.pad_model)].name.into());
+        let sony = self.s.live.lock().unwrap().sony;
+        let mi = pad::live_index(&self.st.pad_skin, self.st.pad_model, sony);
+        let title = self.skins.iter().find(|s| s.id == self.st.pad_skin).map(|s| s.name.clone()).unwrap_or_else(|| MODELS[mi].name.into());
         card(ui, &title, |ui| self.live_view(ui, &phys, vigem.then_some(&out)));
 
         ui.add_space(16.0);
+        if ui.selectable_label(pad::is_auto(&self.st.pad_skin, self.st.pad_model), tr("Automatic layout")).clicked() {
+            self.st.pad_skin = "auto".into();
+        }
         segmented(ui, "cust_filter", &mut self.cust_filter, &[tr("All"), "PS5", "PS4", "Xbox", tr("My skins")]);
         ui.add_space(14.0);
         let gap = 14.0;
@@ -1755,7 +1774,7 @@ impl App {
             if f < 4 {
                 for (mi, md) in MODELS.iter().enumerate().filter(|(_, m)| m.matches_filter(f) && (m.name.to_lowercase().contains(&search) || m.id.contains(&search) || m.tag().to_lowercase().contains(&search))) {
                     visible += 1;
-                    let chosen = !self.skins.iter().any(|s| s.id == self.st.pad_skin) && selected == mi;
+                    let chosen = !pad::is_auto(&self.st.pad_skin, self.st.pad_model) && !self.skins.iter().any(|s| s.id == self.st.pad_skin) && selected == mi;
                     let tag = if md.animated() { format!("{} · {}", md.tag(), tr("Animated")) } else { md.tag().into() };
                     let id = ui.id().with(("tile", mi));
                     if pad::tile(ui, tw, md.name, &tag, chosen, |p, r, demo| { if let Some(g) = demo { pad::paint_model(p, id, r, mi, &g) } else { pad::thumbnail(p, r, mi) } }).clicked() {

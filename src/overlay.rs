@@ -39,14 +39,15 @@ impl Window {
         std::thread::spawn(move || {
             let mut last = None;
             while alive.upgrade().is_some() {
-                let phys = shared.live.lock().unwrap().phys;
+                let (phys, sony) = { let live = shared.live.lock().unwrap(); (live.phys, live.sony) };
                 let settings = shared.settings.lock().unwrap().clone();
-                let changed = last.as_ref().is_none_or(|(previous, previous_settings)| {
-                    *previous != phys || !Arc::ptr_eq(previous_settings, &settings)
+                let identity = sony.map(|input| (input.model, input.extra));
+                let changed = last.as_ref().is_none_or(|(previous, previous_identity, previous_settings)| {
+                    *previous != phys || *previous_identity != identity || !Arc::ptr_eq(previous_settings, &settings)
                 });
                 if changed {
                     ctx.request_repaint_of(viewport_id());
-                    last = Some((phys, settings));
+                    last = Some((phys, identity, settings));
                 }
                 std::thread::sleep(crate::ui::FRAME_60);
             }
@@ -107,14 +108,14 @@ impl Window {
         ctx.show_viewport_deferred(viewport_id(), builder, move |vui, _| {
             let ctx = vui.ctx().clone();
             // Read the engine on each child frame, including while the main app is minimized.
-            let phys = shared.live.lock().unwrap().phys;
+            let (phys, sony) = { let live = shared.live.lock().unwrap(); (live.phys, live.sony) };
             let st = shared.settings.lock().unwrap().clone();
             egui::CentralPanel::default().frame(egui::Frame::NONE).show(vui, |ui| {
                 let rect = ui.max_rect();
                 let picture = rect.shrink(8.);
                 // Test mouse hits against the controller without clipping the rendered window.
                 // Recompute the hit mask only when the model, size or DPI changes.
-                let mi = crate::pad::selected_index(&st.pad_skin, st.pad_model);
+                let mi = crate::pad::live_index(&st.pad_skin, st.pad_model, sony);
                 let ppp = ctx.pixels_per_point();
                 let width = (rect.width() * ppp).round().max(1.) as i32;
                 let height = (rect.height() * ppp).round().max(1.) as i32;
@@ -138,7 +139,7 @@ impl Window {
                 if let Some(skin) = &skin {
                     skin.paint(ui.painter(), picture, &phys);
                 } else {
-                    crate::pad::paint_overlay(ui.painter(), picture, crate::pad::selected_index(&st.pad_skin, st.pad_model), &phys);
+                    crate::pad::paint_overlay(ui.painter(), picture, mi, &phys, sony.map_or(0, |sample| sample.extra));
                 }
                 if !settings.locked {
                     let resizing = resize_edges(&ctx, rect);

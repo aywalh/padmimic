@@ -9,6 +9,7 @@ mod overlay;
 mod pad;
 mod setup;
 mod skin;
+mod sony_input;
 mod tray;
 mod ui;
 mod update;

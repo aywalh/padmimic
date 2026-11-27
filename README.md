@@ -12,6 +12,11 @@ Map your controller to keys, mouse actions or a virtual Xbox 360 pad. Save layou
 
 ![The redesigned padmimic controller view](docs/redesign.png)
 
+
+## PlayStation controllers
+
+DualShock 4 and DualSense work directly over USB and Bluetooth. Use **Automatic layout** in Customization to match the live preview and pop-out to the detected controller. PlayStation touchpad clicks and supported mute-button reports can be mapped in the Buttons card.
+
 ## Make it yours
 
 Choose from **39 static designs** under **Customization**, or import your own skin. Buttons, sticks and triggers respond to live input.

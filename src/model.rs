@@ -265,6 +265,7 @@ pub const PAD_BUTTONS: [Out; 11] = [Out::A, Out::B, Out::X, Out::Y, Out::LB, Out
 #[serde(default)]
 pub struct Set {
     pub buttons: [Button; 11],
+    pub sony_buttons: [Button; 2],
     pub dpad: DPad,
     pub sticks: [Stick; 2],
     pub triggers: [Axis; 2],
@@ -274,13 +275,14 @@ pub struct Set {
 impl Default for Set {
     /// Empty set: nothing mapped.
     fn default() -> Self {
-        Set { buttons: Default::default(), dpad: DPad::default(), sticks: Default::default(), triggers: Default::default(), keys: vec![] }
+        Set { buttons: Default::default(), sony_buttons: Default::default(), dpad: DPad::default(), sticks: Default::default(), triggers: Default::default(), keys: vec![] }
     }
 }
 
 impl Set {
     fn all_buttons(&self) -> impl Iterator<Item = &Button> {
         self.buttons.iter()
+            .chain(&self.sony_buttons)
             .chain(&self.dpad.dirs)
             .chain(self.sticks.iter().flat_map(|s| s.dirs.iter().chain([&s.modifier])))
             .chain(self.triggers.iter().flat_map(|t| [&t.p, &t.n]))
@@ -465,6 +467,7 @@ impl Settings {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Elem {
     Btn(u8),
+    Sony(u8),
     DPad(u8),
     Stick(u8, u8),
     StickMod(u8),
@@ -476,6 +479,7 @@ impl Set {
     pub fn button(&self, e: Elem) -> Option<&Button> {
         Some(match e {
             Elem::Btn(i) => &self.buttons[i as usize],
+            Elem::Sony(i) => self.sony_buttons.get(i as usize)?,
             Elem::DPad(d) => &self.dpad.dirs[d as usize],
             Elem::Stick(s, d) => &self.sticks[s as usize].dirs[d as usize],
             Elem::StickMod(s) => &self.sticks[s as usize].modifier,
@@ -486,6 +490,7 @@ impl Set {
     pub fn button_mut(&mut self, e: Elem) -> Option<&mut Button> {
         Some(match e {
             Elem::Btn(i) => &mut self.buttons[i as usize],
+            Elem::Sony(i) => self.sony_buttons.get_mut(i as usize)?,
             Elem::DPad(d) => &mut self.dpad.dirs[d as usize],
             Elem::Stick(s, d) => &mut self.sticks[s as usize].dirs[d as usize],
             Elem::StickMod(s) => &mut self.sticks[s as usize].modifier,
