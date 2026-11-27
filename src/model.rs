@@ -444,7 +444,7 @@ impl Default for Settings {
             smoothing: false, history: 10, weight: 0.2, mouse_refresh: 1, auto_profile: false, auto_profiles: vec![],
             toggle: Input::Key(0x77),
             lang: String::new(),
-            check_updates: crate::update::repository().is_some(),
+            check_updates: true,
             theme: 1, accent: 0, pad_accent: true, backdrop: 3, opacity: 0.62, dock: 0, smart_docking: true, motion: true, size: 0, pad_model: 0, pad_skin: String::new(), overlay: OverlaySettings::default(), tray_variant: 0,
         }
     }

@@ -17,6 +17,7 @@ pub fn repository() -> Option<&'static str> {
 pub fn repository_url() -> Option<String> {
     repository().map(|repo| format!("https://github.com/{repo}"))
 }
+const DEFAULT_REPOSITORY_ID: u64 = 1458600743;
 const NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Debug)]
@@ -61,10 +62,13 @@ pub(crate) fn powershell(script: &str) -> Result<(i32, String), String> {
 
 /// Latest release if it is newer than this build.
 pub fn check() -> Result<Option<Release>, String> {
-    let Some(repo) = repository() else { return Ok(None) };
+    let endpoint = match repository() {
+        Some(repo) => format!("repos/{repo}"),
+        None => format!("repositories/{DEFAULT_REPOSITORY_ID}"),
+    };
     let script = format!(
         "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol='Tls12'
-try {{ $r = Invoke-RestMethod -UseBasicParsing -Headers @{{'User-Agent'='padmimic-updater'}} 'https://api.github.com/repos/{repo}/releases/latest' }} catch {{ exit 10 }}
+try {{ $r = Invoke-RestMethod -UseBasicParsing -Headers @{{'User-Agent'='padmimic-updater'}} 'https://api.github.com/{endpoint}/releases/latest' }} catch {{ exit 10 }}
 $r | ConvertTo-Json -Depth 4 -Compress"
     );
     let (code, out) = powershell(&script)?;

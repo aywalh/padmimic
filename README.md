@@ -40,6 +40,6 @@ Open the pop-out from the live preview or **Settings → Controller overlay**. D
 - **`padmimic.exe`** is portable. Its settings and profiles live beside the executable.
 - For virtual gamepad output, install [ViGEmBus](https://github.com/nefarius/ViGEmBus). Keyboard and mouse mappings can be used without that driver.
 
-Run `cargo test --locked` to test and `./release.ps1` to build with remapped build paths. For automatic update checks in self-built copies, set `PADMIMIC_UPDATE_REPOSITORY` to a public repository in `owner/name` format at build time. Other builds can be updated manually.
+Run `cargo test --locked` to test and `./release.ps1` to build with remapped build paths. Padmimic checks the official GitHub release by default. To build against a different update repository, set `PADMIMIC_UPDATE_REPOSITORY` to its public `owner/name` at build time.
 
 [MIT License](LICENSE) · [Controller catalog](docs/controllers.md) · [Overlay guide](docs/controller-overlay.md)
