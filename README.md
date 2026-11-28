@@ -2,33 +2,44 @@
 
 ![padmimic: Controller remapping for Windows](docs/banner.svg)
 
-Map your controller to keys, mouse actions or a virtual Xbox 360 pad. Save layouts as profiles and check each input in the live preview.
+Turn your keyboard, mouse or controller into the inputs your game needs. Build a layout, watch it respond in the live preview, and save it as a profile.
 
-## Set up a profile
+**Windows 10 / 11 · Keyboard and mouse mappings · PlayStation and Xbox controllers**
 
-1. Connect your pad and open **Controller** to check live inputs.
-2. Assign an output to a button, stick direction or trigger. Save the mappings as a profile.
-3. Turn padmimic **On**. Switch between up to eight mapping sets while playing.
-
-![The redesigned padmimic controller view](docs/redesign.png)
-
+[Download the latest release](https://github.com/aywalh/padmimic/releases/latest)
 
 ## Keyboard to controller
 
-Open **Keyboard & mouse** to map keys to Xbox 360 controller inputs and preview the result. Choose a keyboard layout, assign keys to sticks or buttons, and set a walk key for finer movement. The Controller tab lists connected input devices and lets you assign additional keyboards to virtual players 2–4. Enable keyboard mappings and install ViGEmBus to send virtual controller input to games.
+Open **Keyboard** to see your keys and controller preview together. Click a key to choose its controller action, or start with the **Shooter**, **Racing** or **Jump'n'Run** template.
 
-## PlayStation controllers
+![Padmimic keyboard mappings alongside the virtual controller preview, mouse controls and walk settings](docs/keyboard-controller.png)
 
-DualShock 4 and DualSense work directly over USB and Bluetooth. Use **Automatic layout** in Customization to match the live preview and pop-out to the detected controller. PlayStation touchpad clicks and supported mute-button reports can be mapped in the Buttons card.
+The coloured labels show each key's assigned output. The screenshot uses an example layout with every input released.
 
-## Make it yours
+- Map WASD and arrow keys to stick directions, and assign other keys to controller buttons.
+- Use mouse movement for the right stick, with sensitivity, anti-deadzone and smoothing controls.
+- Set a walk key and walk speed for finer movement.
+- Assign additional keyboards to virtual players 2–4 from the device list in **Controller**.
+- Switch controller mappings and keyboard mappings on or off independently.
 
-Choose from **39 static designs** under **Customization**, or import your own skin. Buttons, sticks and triggers respond to live input.
+Enable **Keyboard** mappings, turn padmimic **On**, and use the live preview to check your layout. Virtual Xbox 360 output requires [ViGEmBus](https://github.com/nefarius/ViGEmBus).
+
+## Remap your controller
+
+Connect your pad and open **Controller** to check live inputs. Assign an output to a button, stick direction or trigger, then save the mappings as a profile. Each profile has up to eight mapping sets.
+
+![The padmimic controller view with live input and stick mappings](docs/redesign.png)
+
+DualShock 4 and DualSense input is supported over USB and Bluetooth. Choose **Automatic layout** in Customization to match the preview and pop-out to the detected controller. Touchpad clicks and supported DualSense mute-button reports can be mapped in the Buttons card.
+
+## Choose your controller design
+
+Pick from **39 static designs** under **Customization**, or import your own skin. Buttons, sticks and triggers react to live input.
 
 <details>
-<summary>See some of the controller designs</summary>
+<summary>Browse a selection of controller designs</summary>
 
-![A selection of static designs](docs/static-designs.png)
+![A selection of included static controller designs](docs/static-designs.png)
 
 </details>
 
@@ -37,18 +48,18 @@ Choose from **39 static designs** under **Customization**, or import your own sk
 Open the pop-out from the live preview or **Settings → Controller overlay**. Drag it to move, resize from an edge, and enable click-through when it is in place. For Discord, share the screen that contains the overlay.
 
 <details>
-<summary>See the appearance settings</summary>
+<summary>Appearance settings</summary>
 
-![Appearance settings](docs/settings-redesign.png)
+![Padmimic appearance settings](docs/settings-redesign.png)
 
 </details>
 
 ## Install or build
 
-- **`padmimic-setup.exe`** installs per user on Windows 10 or 11.
-- **`padmimic.exe`** is portable. Its settings and profiles live beside the executable.
-- For virtual gamepad output, install [ViGEmBus](https://github.com/nefarius/ViGEmBus). Keyboard and mouse mappings can be used without that driver.
+- **padmimic-setup.exe** installs per user on Windows 10 or 11.
+- **padmimic.exe** runs as a portable app. Settings and profiles live beside the executable.
+- Virtual controller output needs **ViGEmBus**. Mapping a controller to keyboard or mouse actions works without that driver.
 
-Run `cargo test --locked` to test and `./release.ps1` to build with remapped build paths. Padmimic checks the official GitHub release by default. To build against a different update repository, set `PADMIMIC_UPDATE_REPOSITORY` to its public `owner/name` at build time.
+Run `cargo test --locked` to test and `./release.ps1` to build with remapped build paths. Padmimic checks the official GitHub release by default. To build against another update repository, set `PADMIMIC_UPDATE_REPOSITORY` to its public `owner/name` at build time.
 
 [MIT License](LICENSE) · [Controller catalog](docs/controllers.md) · [Overlay guide](docs/controller-overlay.md)
