@@ -316,12 +316,15 @@ pub struct Profile {
     pub set_names: [String; 8],
     pub sets: [Set; 8],
     pub mouse_aim: MouseAim,
+    /// Held key (0 = none) scales the left stick to `walk`, e.g. walking instead of running on WASD.
+    pub walk_vk: u16,
+    pub walk: f32,
 }
 
 impl Default for Profile {
     /// Like AntiMicro: nothing mapped, the real controller reaches the game untouched.
     fn default() -> Self {
-        Profile { name: String::new(), key_press_ms: 100, set_names: Default::default(), sets: Default::default(), mouse_aim: MouseAim::default() }
+        Profile { name: String::new(), key_press_ms: 100, set_names: Default::default(), sets: Default::default(), mouse_aim: MouseAim::default(), walk_vk: 0, walk: 0.5 }
     }
 }
 
@@ -435,7 +438,22 @@ pub struct Settings {
     pub pad_skin: String,
     pub overlay: OverlaySettings,
     pub tray_variant: usize,
+    /// Party mode: keyboards (devices::Device::id) that each drive their own virtual pad, player 2, 3, 4.
+    pub party: Vec<String>,
+    /// While on: the real controller's mappings work (off = the controller is left alone).
+    pub pad_on: bool,
+    /// While on: keyboard / mouse mappings work, incl. macros, mouse aim and party players.
+    pub kb_on: bool,
 }
+
+/// Keyboard-only layout for party-mode players (no mouse): WASD left stick, arrows right stick.
+pub const PARTY_LAYOUT: [(u16, Out); 21] = [
+    (b'W' as u16, Out::LUp), (b'A' as u16, Out::LLeft), (b'S' as u16, Out::LDown), (b'D' as u16, Out::LRight),
+    (0x26, Out::RUp), (0x25, Out::RLeft), (0x28, Out::RDown), (0x27, Out::RRight),
+    (0x20, Out::A), (b'C' as u16, Out::B), (b'E' as u16, Out::X), (b'R' as u16, Out::Y),
+    (b'Q' as u16, Out::LB), (b'F' as u16, Out::RB), (b'Z' as u16, Out::LT), (b'X' as u16, Out::RT),
+    (0x10, Out::LS), (b'V' as u16, Out::RS), (0x0D, Out::Start), (0x08, Out::Back), (b'1' as u16, Out::Up),
+];
 
 impl Default for Settings {
     fn default() -> Self {
@@ -447,7 +465,7 @@ impl Default for Settings {
             toggle: Input::Key(0x77),
             lang: String::new(),
             check_updates: true,
-            theme: 1, accent: 0, pad_accent: true, backdrop: 3, opacity: 0.62, dock: 0, smart_docking: true, motion: true, size: 0, pad_model: 0, pad_skin: String::new(), overlay: OverlaySettings::default(), tray_variant: 0,
+            theme: 1, accent: 0, pad_accent: true, backdrop: 3, opacity: 0.62, dock: 0, smart_docking: true, motion: true, size: 0, pad_model: 0, pad_skin: String::new(), overlay: OverlaySettings::default(), tray_variant: 0, party: vec![], pad_on: true, kb_on: true,
         }
     }
 }

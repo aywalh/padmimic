@@ -25,9 +25,14 @@ fn hook_key(vk: u32, is_down: bool) -> bool {
     DOWN[b].store(is_down, Relaxed);
     if !(BLOCK[a].load(Relaxed) || BLOCK[b].load(Relaxed)) { return false }
     // never swallow input meant for padmimic's own window, or it can't be clicked while on
+    !own_foreground()
+}
+
+/// One of padmimic's windows (main, settings, overlay) is in front. Keys typed anywhere else are never shown.
+pub fn own_foreground() -> bool {
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(GetForegroundWindow(), &mut pid) };
-    pid != unsafe { GetCurrentProcessId() }
+    pid == unsafe { GetCurrentProcessId() }
 }
 
 pub unsafe extern "system" fn kb_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -152,6 +157,12 @@ pub fn screen() -> (i32, i32) {
     unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
 }
 
+/// The key at this physical position (scan code) on the user's layout, e.g. 0x15 is Z on QWERTZ, Y on QWERTY.
+pub fn vk_at(scan: u16) -> Option<u16> {
+    let vk = unsafe { MapVirtualKeyW(scan as u32, MAPVK_VSC_TO_VK) } as u16;
+    (vk != 0).then_some(vk)
+}
+
 pub fn key_name(vk: u16) -> String {
     let fixed = match vk {
         0 => "–", 1 => "Mouse L", 2 => "Mouse R", 4 => "Mouse M", 5 => "Mouse 4", 6 => "Mouse 5",
@@ -166,6 +177,13 @@ pub fn key_name(vk: u16) -> String {
     if !fixed.is_empty() { return fixed.into() }
     if (0x70..=0x87).contains(&vk) { return format!("F{}", vk - 0x6F) }
     if (0x60..=0x69).contains(&vk) { return format!("Num {}", vk - 0x60) }
+    // punctuation keys: the character the layout prints ("^", "+", "ü"), not "ZIRKUMFLEX" / "VK 0xbb"
+    if matches!(vk, 0xBA..=0xC0 | 0xDB..=0xDF | 0xE2) {
+        let ch = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_CHAR) } & 0x7FFF_FFFF; // top bit = dead key
+        if let Some(c) = char::from_u32(ch).filter(|c| !c.is_control() && *c != '\0') {
+            return c.to_lowercase().to_string();
+        }
+    }
     let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as i32;
     let mut buf = [0u16; 32];
     let n = unsafe { GetKeyNameTextW(scan << 16, buf.as_mut_ptr(), 32) };
@@ -393,4 +411,18 @@ pub fn overlay_hit_test(title: &str, rectangles: Option<Vec<[i32; 4]>>) -> bool 
         DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, (&color as *const u32).cast(), 4);
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn punctuation_keys_get_their_character() {
+        // physical positions right of M: , . on every common layout
+        for scan in [0x33u16, 0x34] {
+            let vk = super::vk_at(scan).expect("layout maps the key");
+            let n = super::key_name(vk);
+            println!("{scan:#04x} -> {vk:#04x} -> {n}");
+            assert!(!n.starts_with("VK") && n.chars().count() == 1, "{scan:#04x} -> {n}");
+        }
+    }
 }

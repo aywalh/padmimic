@@ -529,11 +529,13 @@ impl<'a> Regler<'a> {
             ui.data_mut(|d| d.insert_temp(edit_id, fmt(val)));
             ui.memory_mut(|m| m.request_focus(edit_id));
         }
+        let track = Rect::from_min_max(Pos2::new(rect.left() + rect.width() * 0.48, rect.center().y - 2.0), Pos2::new(rect.right() - 80.0, rect.center().y + 2.0));
         if resp.drag_started() { ui.data_mut(|d| d.insert_temp(id, to_t(val))); }
         if resp.dragged() {
+            // sideways only, the knob follows the mouse 1:1 (up / down keeps scrolling the page)
             let d = resp.drag_delta();
             let fine = if ui.input(|i| i.modifiers.shift) { 0.1 } else { 1.0 };
-            let t: f64 = ui.data(|m| m.get_temp(id)).unwrap_or(to_t(val)) + (d.x - d.y) as f64 / 260.0 * fine;
+            let t: f64 = ui.data(|m| m.get_temp(id)).unwrap_or(to_t(val)) + d.x as f64 / track.width().max(40.0) as f64 * fine;
             ui.data_mut(|m| m.insert_temp(id, t.clamp(0.0, 1.0)));
             let nv = from_t(t);
             if nv != val { val = nv; resp.mark_changed() }
@@ -545,8 +547,9 @@ impl<'a> Regler<'a> {
         let hot = enabled && (resp.hovered() || resp.dragged());
         let dim = |x: Color32| if enabled { x } else { x.gamma_multiply(0.45) };
         p.rect_filled(rect, 19.0, if hot { c.hover } else { c.idle });
+        let drag = anim(ui.ctx(), id.with("drag"), resp.dragged(), 0.12);
+        if drag > 0.0 { p.rect_stroke(rect, 19.0, Stroke::new(1.5, c.acc.gamma_multiply(drag)), egui::StrokeKind::Inside); }
         let t = to_t(val).clamp(0.0, 1.0) as f32;
-        let track = Rect::from_min_max(Pos2::new(rect.left() + rect.width() * 0.48, rect.center().y - 2.0), Pos2::new(rect.right() - 80.0, rect.center().y + 2.0));
         p.rect_filled(track, 2.0, dim(c.line));
         let x = track.left() + track.width() * t;
         p.rect_filled(Rect::from_min_max(track.min, Pos2::new(x, track.bottom())), 2.0, dim(c.acc));
@@ -555,7 +558,16 @@ impl<'a> Regler<'a> {
         p.circle_filled(Pos2::new(x, track.center().y), kr, dim(Color32::WHITE));
         p.text(rect.left_center() + vec2(16.0, 0.0), Align2::LEFT_CENTER, self.text, FontId::proportional(14.0), dim(c.text));
         p.text(rect.right_center() - vec2(16.0, 0.0), Align2::RIGHT_CENTER, format!("{}{}", fmt(val), self.suffix), bold(13.0), dim(if hot { c.acc } else { c.weak }));
-        resp.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text(tr("Drag = adjust (Shift = fine) · Click = type a number"))
+        if drag > 0.0 {
+            // feedback while dragging: the value rides above the knob
+            let fp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, id.with("bubble")));
+            let g = fp.layout_no_wrap(format!("{}{}", fmt(val), self.suffix), bold(12.5), Color32::WHITE);
+            let b = Rect::from_center_size(Pos2::new(x, rect.top() - 6.0 - 12.0 * drag), g.size() + vec2(16.0, 8.0));
+            fp.rect_filled(b, 8.0, c.acc.gamma_multiply(drag));
+            fp.galley(b.center() - g.size() / 2.0, g, Color32::WHITE.gamma_multiply(drag));
+        }
+        let tip = if resp.dragged() { resp } else { resp.on_hover_text(tr("Drag left / right = adjust (Shift = fine) · Click = type a number")) };
+        tip.on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
     }
 }
 
@@ -647,6 +659,25 @@ const KB_MAIN: [&[(u16, f32)]; 6] = [
     &[(0xA0, 1.25), (0xE2, 1.0), (0x59, 1.0), (0x58, 1.0), (0x43, 1.0), (0x56, 1.0), (0x42, 1.0), (0x4E, 1.0), (0x4D, 1.0), (0xBC, 1.0), (0xBE, 1.0), (0xBD, 1.0), (0xA1, 2.75)],
     &[(0xA2, 1.5), (0x5B, 1.25), (0xA4, 1.25), (0x20, 5.75), (0xA5, 1.25), (0x5D, 1.25), (0xA3, 1.75)],
 ];
+/// Physical position (scan code) of every character key in KB_MAIN, 0 = layout-independent key.
+/// The drawn keyboard shows what sits there on *your* layout (QWERTZ, Swiss, QWERTY, AZERTY …).
+const KB_SCAN: [&[u16]; 6] = [
+    &[],
+    &[0x29, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0],
+    &[0, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0],
+    &[0, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2B],
+    &[0, 0x56, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0],
+    &[],
+];
+
+/// The key drawn at row `r`, column `i` of the main block, on the user's layout.
+fn main_vk(r: usize, i: usize, vk: u16) -> u16 {
+    match KB_SCAN[r].get(i) {
+        Some(&scan) if scan != 0 => winio::vk_at(scan).unwrap_or(vk),
+        _ => vk,
+    }
+}
+
 const KB_NAV: [&[(u16, f32)]; 6] = [
     &[(0x2C, 1.0), (0x91, 1.0), (0x13, 1.0)],
     &[(0x2D, 1.0), (0x24, 1.0), (0x21, 1.0)],
@@ -687,7 +718,8 @@ fn keyboard(ui: &mut egui::Ui, sel: Option<u16>, numpad: bool) -> Option<u16> {
     for (x0, rows) in blocks {
         for (r, row) in rows.iter().enumerate() {
             let mut x = x0;
-            for &(vk, w) in row.iter() {
+            for (i, &(vk, w)) in row.iter().enumerate() {
+                let vk = if x0 == 0.0 { main_vk(r, i, vk) } else { vk };
                 if vk != 0 {
                     let kr = Rect::from_min_size(rect.min + vec2(x * u, r as f32 * u + if r > 0 { 4.0 } else { 0.0 }), vec2(w * u - 3.0, u - 3.0));
                     let on = sel == Some(vk);
@@ -822,7 +854,7 @@ enum Dlg {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Cap { Assign(Elem, Option<usize>), KeyBind(usize), Toggle }
+enum Cap { Assign(Elem, Option<usize>), KeyBind(usize), Walk, Toggle }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab { Controller, Kbm, Custom, Settings }
@@ -856,6 +888,10 @@ pub struct App {
     // ---- look & motion
     brand_started: Option<Instant>,
     brand_hover: bool,            // pointer over the logo last frame
+    kb_player: usize,             // Keyboard tab: 0 = this profile, 1.. = party players
+    kb_pick: Option<(u16, Pos2)>, // Keyboard tab: key whose output picker is open, and where
+    kb_pick_frames: u32,
+    grow_for_kb: bool,            // just switched to the Keyboard tab: make the window big enough
     launched: Option<Instant>,    // first frame, for the start screen
     normal: Option<Rect>,         // last window rect while not maximized
     page_t: Instant,             // last page change, for the page transition
@@ -906,7 +942,7 @@ impl App {
             profiles: vec![], tab: Tab::Controller, dlgs: vec![], cap: None, pick_tab: 0, adv_page: 0, adv_sel: 0, set_page: 0,
             epp_prev, auto_t: Instant::now(), auto_last: String::new(), toast: None, show_live: true, trail: Default::default(), lang_prompt, lang_more: false, upd: Arc::default(),
             vigem_msg: Arc::default(),
-            brand_started: None, brand_hover: false, launched: None, normal: None, page_t: Instant::now(), prev_tab: Tab::Controller, dlg_t: vec![], settings_open: false, side_right: true, dock_desktop: crate::docking::Desktop::default(), side_applied: false,
+            brand_started: None, brand_hover: false, kb_player: 0, kb_pick: None, kb_pick_frames: 0, grow_for_kb: false, launched: None, normal: None, page_t: Instant::now(), prev_tab: Tab::Controller, dlg_t: vec![], settings_open: false, side_right: true, dock_desktop: crate::docking::Desktop::default(), side_applied: false,
             set_detail: false, look_sent: None, material_ok: true, show_settings: false, restore: None,
             skins: vec![], skin_errs: vec![], skins_loaded: false, cust_filter: 0, cust_search: String::new(), frame_pacer: FramePacer::default(), controller_overlay: crate::overlay::Window::default(), taskbar_icon_applied: false,
         };
@@ -981,6 +1017,7 @@ impl App {
     fn go(&mut self, t: Tab) {
         if self.tab != t {
             if t == Tab::Settings && self.tab != Tab::Settings { self.prev_tab = self.tab }
+            if t == Tab::Kbm { self.grow_for_kb = true } // the whole keyboard at a glance
             self.tab = t;
             self.page_t = Instant::now();
         }
@@ -1032,10 +1069,11 @@ impl App {
         }
     }
 
-    fn capture(&mut self) {
+    /// `focused`: only keys pressed while padmimic is in front count (nothing typed elsewhere is read).
+    fn capture(&mut self, focused: bool) {
         let Some((c, armed)) = self.cap else { return };
         let phys = self.s.live.lock().unwrap().phys;
-        let key = (1..255u16).find(|&k| winio::down(k));
+        let key = if focused { (1..255u16).find(|&k| winio::down(k)) } else { None };
         let pad = Out::ALL.into_iter().find(|&o| pad_down(&phys, o));
         match (armed, key.is_some() || pad.is_some()) {
             (false, false) => self.cap = Some((c, true)), // wait until the click that started capture is released
@@ -1053,6 +1091,7 @@ impl App {
                     Cap::KeyBind(i) => {
                         if let (Some(k), Some(kb)) = (key, self.set().keys.get_mut(i)) { kb.vk = k }
                     }
+                    Cap::Walk => if let Some(k) = key { self.p.walk_vk = k },
                     Cap::Toggle => self.st.toggle = key.map(Input::Key).or(pad.map(Input::Pad)).unwrap_or(self.st.toggle),
                 }
                 self.cap = None;
@@ -1068,7 +1107,7 @@ impl App {
     // ------------------------------------------------------------- main window parts
 
     fn page_title(&self) -> &'static str {
-        match self.tab { Tab::Controller => tr("Controller"), Tab::Kbm => tr("Keyboard & mouse"), Tab::Custom => tr("Customization"), Tab::Settings => tr("Settings") }
+        match self.tab { Tab::Controller => tr("Controller"), Tab::Kbm => tr("Keyboard"), Tab::Custom => tr("Customization"), Tab::Settings => tr("Settings") }
     }
 
     /// Header of the content column: page title, save, live view, window buttons.
@@ -1115,6 +1154,11 @@ impl App {
                     ui.scope(|ui| {
                         ui.set_opacity(a);
                         if pill(ui, tr("Save"), true).clicked() && dirty { self.save() }
+                        // back to the last saved state (e.g. after trying a template)
+                        if pill(ui, tr("Cancel"), false).on_hover_text(tr("Discard all changes since the last save")).clicked() && dirty {
+                            self.p = self.saved.clone();
+                            self.kb_pick = None;
+                        }
                     });
                 }
             });
@@ -1138,6 +1182,20 @@ impl App {
         self.look_sent = None; // re-apply the material after the size jump
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(wa.min));
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(wa.size()));
+    }
+
+    /// Grow (never shrink) the window towards `want`, inside the monitor's work area. Left alone while maximized.
+    fn grow_window(&mut self, ctx: &egui::Context, want: Vec2) {
+        if self.restore.is_some() { return }
+        let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else { return };
+        let ppp = ctx.pixels_per_point();
+        let (l, t, r, b) = winio::work_area((outer.center().x * ppp) as i32, (outer.center().y * ppp) as i32);
+        let wa = Rect::from_min_max(Pos2::new(l as f32, t as f32) / ppp, Pos2::new(r as f32, b as f32) / ppp);
+        let size = outer.size().max(want.min(wa.size()));
+        if size == outer.size() { return }
+        let pos = Pos2::new(outer.left().clamp(wa.left(), (wa.right() - size.x).max(wa.left())), outer.top().clamp(wa.top(), (wa.bottom() - size.y).max(wa.top())));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
     }
 
     fn save(&mut self) {
@@ -1165,7 +1223,7 @@ impl App {
         crate::brand::mark(ui.painter(), center, 0.94, c.text, draw);
         ui.add_space(64.0 - height);
 
-        let items = [(Icon::Pad, tr("Controller")), (Icon::Keyboard, tr("Keyboard & mouse")), (Icon::Palette, tr("Customization")), (Icon::Gear, tr("Settings")), (Icon::Gauge, tr("Latency meter")), (Icon::Info, tr("About padmimic"))];
+        let items = [(Icon::Pad, tr("Controller")), (Icon::Keyboard, tr("Keyboard")), (Icon::Palette, tr("Customization")), (Icon::Gear, tr("Settings")), (Icon::Gauge, tr("Latency meter")), (Icon::Info, tr("About padmimic"))];
         let sel = if self.settings_open || self.tab == Tab::Settings { Some(3) } else { Some(match self.tab { Tab::Kbm => 1, Tab::Custom => 2, _ => 0 }) };
         match nav_list(ui, "nav", &items, sel, compact) {
             Some(0) => { self.settings_open = false; self.go(Tab::Controller) }
@@ -1178,7 +1236,9 @@ impl App {
         }
         ui.add_space(14.0);
         self.power(ui, compact);
-        ui.add_space(20.0);
+        ui.add_space(8.0);
+        self.parts(ui, compact);
+        ui.add_space(18.0);
         self.sets(ui, compact);
 
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
@@ -1254,6 +1314,39 @@ impl App {
         if resp.clicked() {
             self.s.on.store(!on, Relaxed);
             ctx.request_repaint();
+        }
+    }
+
+    /// Under the power switch: the two halves on / off on their own (controller mappings, keyboard mappings).
+    fn parts(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let c = pal(ui.visuals().dark_mode);
+        let gap = 6.0;
+        let w = if compact { ui.available_width() } else { (ui.available_width() - gap) / 2.0 };
+        let chip = |ui: &mut egui::Ui, icon: Icon, label: &str, tip: &str, on: &mut bool| {
+            let (r, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
+            let t = anim(ui.ctx(), resp.id, *on, 0.18);
+            let h = anim(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.12);
+            let p = ui.painter();
+            p.rect_filled(r, 10.0, c.idle.lerp_to_gamma(c.hover, 0.6 * h).lerp_to_gamma(c.acc.gamma_multiply(0.25), t));
+            p.rect_stroke(r, 10.0, Stroke::new(1.0, c.line.lerp_to_gamma(c.acc, 0.6 * t)), StrokeKind::Inside);
+            let col = c.weak.lerp_to_gamma(c.text, t);
+            let ir = Rect::from_center_size(if compact { r.center() } else { Pos2::new(r.left() + 18.0, r.center().y) }, vec2(18.0, 18.0));
+            icons::draw(p, icon, ir, if *on { c.acc } else { col });
+            if !compact { p.text(Pos2::new(r.left() + 32.0, r.center().y), Align2::LEFT_CENTER, label, FontId::proportional(12.5), col); }
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("{label}: {} · {tip}", tr(if *on { "ON" } else { "OFF" })));
+            if resp.clicked() { *on = !*on }
+        };
+        let st = &mut self.st;
+        if compact {
+            chip(ui, Icon::Pad, tr("Controller"), tr("Mappings of the real controller"), &mut st.pad_on);
+            ui.add_space(gap);
+            chip(ui, Icon::Keyboard, tr("Keyboard"), tr("Keyboard and mouse mappings, macros, party players"), &mut st.kb_on);
+        } else {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                chip(ui, Icon::Pad, tr("Controller"), tr("Mappings of the real controller"), &mut st.pad_on);
+                chip(ui, Icon::Keyboard, tr("Keyboard"), tr("Keyboard and mouse mappings, macros, party players"), &mut st.kb_on);
+            });
         }
     }
 
@@ -1635,6 +1728,8 @@ impl App {
             card(ui, &format!("{} · {hz} {}{controller}", tr("Live"), tr("upd/s")), |ui| self.live_view(ui, &phys, vigem.then_some(&out)));
             ui.add_space(12.0);
         }
+        devices_card(ui, &mut self.st.party);
+        ui.add_space(12.0);
         let full = ui.available_width();
         let cols = if full > 700.0 { 3 } else if full > 460.0 { 2 } else { 1 };
         let colw = (full - (cols - 1) as f32 * 12.0) / cols as f32;
@@ -1812,9 +1907,195 @@ impl App {
         if reload { self.reload_skins(ui.ctx()) }
     }
 
+    fn apply_layout(&mut self, keys: Vec<KeyBind>, mouse_aim: bool) {
+        self.set().keys = keys;
+        self.p.mouse_aim.enabled = mouse_aim;
+        if mouse_aim { self.p.mouse_aim.stick = VStick::Right }
+        if self.p.walk_vk == 0 { self.p.walk_vk = 0x14 } // CapsLock
+    }
+
+    /// Keyboard → controller translator: a keyboard showing what every key does on the virtual pad, the pad
+    /// next to it reacting live (also while padmimic is off), templates and mouse aim. Party players (2–4)
+    /// show their fixed layout. The full list (turbo, macros, keys → keys) stays below.
     fn kbm_tab(&mut self, ui: &mut egui::Ui, active: &[Elem]) {
-        card(ui, tr("Keyboard & mouse → assignment"), |ui| {
-            ui.weak(tr("Real keys / mouse buttons trigger actions – e.g. controller buttons for mouse & keyboard players."));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33)); // keys light up live
+        let c = pal(ui.visuals().dark_mode);
+        let devices = crate::devices::list();
+        let party: Vec<String> = self.st.party.iter().take(3).cloned().collect();
+        if self.kb_player > party.len() { self.kb_player = 0 }
+
+        // players and templates
+        ui.horizontal(|ui| {
+            if chip(ui, &format!("{} 1", tr("Player")), self.kb_player == 0) { self.kb_player = 0 }
+            for (i, id) in party.iter().enumerate() {
+                let name = devices.iter().find(|d| d.id() == *id).map_or_else(|| id.clone(), |d| d.name.clone());
+                if chip(ui, &format!("{} {} · {name}", tr("Player"), i + 2), self.kb_player == i + 1) { self.kb_player = i + 1 }
+            }
+            if self.kb_player == 0 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let tip = tr("Replaces the assignments of this set.");
+                    if ui.button(tr("Jump'n'Run")).on_hover_text(tip).clicked() { self.apply_layout(platform_layout(), false) }
+                    if ui.button(tr("Racing")).on_hover_text(tip).clicked() { self.apply_layout(racing_layout(), false) }
+                    if ui.button(tr("Shooter")).on_hover_text(tip).clicked() { self.apply_layout(fps_layout(), true) }
+                    ui.label(RichText::new(tr("Template")).color(c.weak));
+                });
+            }
+        });
+        ui.add_space(10.0);
+
+        // what every key does, and what is held right now (player 1: any keyboard; party: only theirs)
+        let main = self.kb_player == 0;
+        let keys: Vec<(u16, Option<Out>)> = if main {
+            self.p.sets[self.cur()].keys.iter().map(|k| (k.vk, pad_out(&k.btn))).collect()
+        } else {
+            PARTY_LAYOUT.iter().map(|&(vk, o)| (vk, Some(o))).collect()
+        };
+        let party_keys = (!main).then(|| devices.iter().find(|d| d.id() == party[self.kb_player - 1]).map(crate::devices::held).unwrap_or_default());
+        // privacy: keys only light up while padmimic itself is in front. Typing in a chat, a password field
+        // or anywhere else never shows up here (stream, recording, someone looking over the shoulder).
+        let focused = winio::own_foreground();
+        let mut held = [false; 256];
+        if focused {
+            for (vk, h) in held.iter_mut().enumerate().skip(1) {
+                *h = match &party_keys { Some(k) => crate::devices::is_held(k, vk as u16), None => winio::down(vk as u16) };
+            }
+        }
+        let bind_of = |vk: u16| keys.iter().find(|k| same_key(k.0, vk)).map(|k| k.1);
+
+        let wide = ui.available_width() >= 900.0;
+        let right_w = (ui.available_width() * 0.27).clamp(330.0, 420.0);
+        let mut picked = None;
+        let mut columns = |ui: &mut egui::Ui, this: &mut Self| {
+            // ---- keyboard
+            let kw = if wide { ui.available_width() - right_w - 14.0 } else { ui.available_width() };
+            ui.allocate_ui(vec2(kw, 0.0), |ui| {
+                card(ui, if main { tr("Click a key to choose what it does on the controller") } else { tr("Fixed layout for party players") }, |ui| {
+                    let units = 15.25 + 0.5 + 3.0;
+                    let u = (ui.available_width() / units).clamp(20.0, 72.0);
+                    let (rect, _) = ui.allocate_exact_size(vec2(units * u, 6.0 * u + 4.0), Sense::hover());
+                    for (x0, rows) in [(0.0, &KB_MAIN), (15.75, &KB_NAV)] {
+                        for (r, row) in rows.iter().enumerate() {
+                            let mut x = x0;
+                            for (i, &(vk, w)) in row.iter().enumerate() {
+                                let vk = if x0 == 0.0 { main_vk(r, i, vk) } else { vk };
+                                if vk != 0 {
+                                    let kr = Rect::from_min_size(rect.min + vec2(x * u, r as f32 * u + if r > 0 { 4.0 } else { 0.0 }), vec2(w * u - 3.0, u - 3.0));
+                                    if key_cap(ui, kr, &short_key(vk), bind_of(vk), held[vk as usize], ui.id().with(("kc", vk)), main).clicked() {
+                                        picked = Some((vk, kr.center_bottom()));
+                                    }
+                                }
+                                x += w;
+                            }
+                        }
+                    }
+                    if main {
+                        // mouse buttons as keys too
+                        ui.add_space(6.0);
+                        let (row, _) = ui.allocate_exact_size(vec2(units * u, u - 3.0), Sense::hover());
+                        let mut x = row.left();
+                        for (vk, name) in [(0x01, tr("Left click")), (0x02, tr("Right click")), (0x04, tr("Middle click")), (0x05, "X1"), (0x06, "X2")] {
+                            let w = if vk <= 0x04 { 2.6 * u } else { 1.4 * u };
+                            let kr = Rect::from_min_size(Pos2::new(x, row.top()), vec2(w - 3.0, u - 3.0));
+                            if key_cap(ui, kr, name, bind_of(vk), held[vk as usize], ui.id().with(("kc", vk)), true).clicked() { picked = Some((vk, kr.center_bottom())) }
+                            x += w;
+                        }
+                        let rest = Rect::from_min_max(Pos2::new(x + 6.0, row.top()), row.max);
+                        ui.painter().text(rest.left_center(), Align2::LEFT_CENTER, tr("Mouse movement → right stick"), FontId::proportional(12.0), if this.p.mouse_aim.enabled { c.acc } else { c.weak });
+                    }
+                });
+            });
+            if !wide { ui.add_space(12.0) }
+            // ---- live controller + feel
+            ui.allocate_ui(vec2(if wide { right_w } else { ui.available_width() }, 0.0), |ui| {
+                card(ui, tr("Virtual controller"), |ui| {
+                    let walking = main && this.p.walk_vk != 0 && held[this.p.walk_vk as usize & 0xFF];
+                    let outs: Vec<Out> = keys.iter().filter(|k| (1..256).any(|vk| held[vk] && same_key(k.0, vk as u16))).filter_map(|k| k.1).collect();
+                    let g = crate::engine::preview_pad(outs.iter().copied(), if walking { this.p.walk as f64 } else { 1.0 });
+                    let sticks = this.p.sets[this.cur()].sticks.clone();
+                    let model = crate::pad::selected_index(&this.st.pad_skin, this.st.pad_model) as u8;
+                    crate::pad::controller_sized(ui, model, &g, None, &sticks, &mut this.trail, 400.0, 0);
+                    let text = if outs.is_empty() { tr("Press a key").to_string() } else { outs.iter().map(|o| short_out(*o)).collect::<Vec<_>>().join("  ") };
+                    ui.vertical_centered(|ui| ui.label(RichText::new(text).font(bold(13.0)).color(if outs.is_empty() { c.weak } else { c.acc })));
+                    if main {
+                        ui.add_space(6.0);
+                        let aim = &mut this.p.mouse_aim;
+                        ui.checkbox(&mut aim.enabled, tr("Mouse → right stick"));
+                        rg(tr("Sensitivity")).show(ui, &mut aim.sens, 0.05..=5.0);
+                        rg(tr("Anti-deadzone")).show(ui, &mut aim.deadzone, 0.0..=0.5)
+                            .on_hover_text(tr("Games ignore small stick moves. Raise this if slow mouse moves don't turn the camera."));
+                        rg(tr("Smoothing")).show(ui, &mut aim.smooth, 0.0..=0.95);
+                        ui.horizontal(|ui| {
+                            ui.label(tr("Walk key"));
+                            let label = if this.capturing(Cap::Walk) { tr("Press a key…").into() } else if this.p.walk_vk == 0 { tr("none").into() } else { winio::key_name(this.p.walk_vk) };
+                            if ui.add(egui::Button::new(label).min_size(vec2(90.0, 26.0))).clicked() { this.cap = Some((Cap::Walk, false)) }
+                            if this.p.walk_vk != 0 && ui.small_button("×").clicked() { this.p.walk_vk = 0 }
+                        });
+                        rg(tr("Walk speed")).show(ui, &mut this.p.walk, 0.1..=0.9);
+                    } else {
+                        ui.label(RichText::new(tr("WASD / arrows = sticks, Space A, C B, E X, R Y, Q LB, F RB, Z LT, X RT, Enter Start")).size(12.0).color(c.weak));
+                    }
+                });
+            });
+        };
+        if wide { ui.horizontal_top(|ui| { ui.spacing_mut().item_spacing.x = 14.0; columns(ui, self) }); } else { columns(ui, self) }
+        if let Some(p) = picked { self.kb_pick = Some(p) }
+        self.key_picker(ui.ctx());
+
+        if main {
+            ui.add_space(12.0);
+            egui::CollapsingHeader::new(tr("All assignments (turbo, macros, keys → keys …)")).show(ui, |ui| self.kbm_list(ui, active));
+        }
+    }
+
+    /// Popup under a clicked key: pick its controller output, remove it, or open the full editor.
+    fn key_picker(&mut self, ctx: &egui::Context) {
+        let Some((vk, at)) = self.kb_pick else { return };
+        let solid = pal_with(ctx.theme() == Theme::Dark, 1.0);
+        let idx = self.p.sets[self.cur()].keys.iter().position(|k| same_key(k.vk, vk));
+        let cur = idx.and_then(|i| pad_out(&self.p.sets[self.cur()].keys[i].btn));
+        let mut choice: Option<Option<Out>> = None;
+        let mut more = false;
+        let area = egui::Area::new(egui::Id::new("key_picker")).order(egui::Order::Foreground).fixed_pos(at + vec2(-150.0, 6.0)).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).fill(solid.card).corner_radius(12).inner_margin(10).show(ui, |ui| {
+                ui.set_width(300.0);
+                ui.label(RichText::new(format!("{} →", winio::key_name(vk))).font(bold(14.0)));
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    for o in Out::ALL {
+                        let on = cur == Some(o);
+                        let b = egui::Button::new(RichText::new(short_out(o)).color(Color32::WHITE).font(bold(12.0)))
+                            .fill(if on { out_color(o) } else { out_color(o).gamma_multiply(0.55) }).min_size(vec2(44.0, 26.0)).corner_radius(6);
+                        if ui.add(b).on_hover_text(o.label()).clicked() { choice = Some(Some(o)) }
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if idx.is_some() && ui.button(tr("Remove")).clicked() { choice = Some(None) }
+                    if idx.is_some() && ui.button(tr("More (turbo, hold …)")).clicked() { more = true }
+                });
+            });
+        });
+        let clicked_outside = ctx.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer() && self.kb_pick_frames > 1;
+        self.kb_pick_frames += 1;
+        match choice {
+            Some(Some(o)) => match idx {
+                Some(i) => self.set().keys[i].btn = Button::out(Act::Pad(o)),
+                None => self.set().keys.push(KeyBind { vk, btn: Button::out(Act::Pad(o)) }),
+            },
+            Some(None) => { self.set().keys.retain(|k| !same_key(k.vk, vk)); }
+            None => {}
+        }
+        if more { if let Some(i) = idx { self.open(Dlg::Button(Elem::Key(i as u16))) } }
+        if choice.is_some() || more || clicked_outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.kb_pick = None;
+            self.kb_pick_frames = 0;
+        }
+    }
+
+    /// The full list of key assignments: every key → any action, with turbo, macros, sets …
+    fn kbm_list(&mut self, ui: &mut egui::Ui, active: &[Elem]) {
+        card(ui, "", |ui| {
             let mut remove = None;
             let n = self.p.sets[self.cur()].keys.len();
             for i in 0..n {
@@ -1835,18 +2116,13 @@ impl App {
             if ui.button(format!("+  {}", tr("Assignment"))).clicked() {
                 self.set().keys.push(KeyBind { vk: 0x20, btn: Button::out(Act::Pad(Out::A)) });
             }
-        });
-        ui.add_space(6.0);
-        let aim = &mut self.p.mouse_aim;
-        card(ui, tr("Mouse → stick"), |ui| {
+            ui.add_space(6.0);
+            let aim = &mut self.p.mouse_aim;
             ui.horizontal(|ui| {
-                ui.checkbox(&mut aim.enabled, tr("Active"));
+                ui.label(tr("Mouse → stick"));
                 ui.selectable_value(&mut aim.stick, VStick::Right, tr("Right stick"));
                 ui.selectable_value(&mut aim.stick, VStick::Left, tr("Left stick"));
             });
-            rg(tr("Sensitivity")).show(ui, &mut aim.sens, 0.05..=5.0);
-            rg(tr("Smoothing")).show(ui, &mut aim.smooth, 0.0..=0.95);
-            rg(tr("Anti-deadzone")).show(ui, &mut aim.deadzone, 0.0..=0.5);
             rg(tr("Sample window")).log().suffix(" ms").show(ui, &mut aim.window_ms, 0.125..=8.0)
                 .on_hover_text(tr("Time the mouse movement is averaged over. ≈ 1000 ÷ mouse polling rate: 1 ms at 1000 Hz, 2 ms at 500 Hz, 0.25 ms at 4000 Hz. Smaller = more direct, too small = jittery."));
         });
@@ -2875,6 +3151,157 @@ fn banner(ui: &mut egui::Ui, icon: Icon, text: &str, col: Color32) -> egui::Resp
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+fn binds(list: &[(u16, Out)]) -> Vec<KeyBind> {
+    list.iter().map(|&(vk, o)| KeyBind { vk, btn: Button::out(Act::Pad(o)) }).collect()
+}
+
+/// Racing: W / S = throttle / brake on the triggers, A / D steer.
+fn racing_layout() -> Vec<KeyBind> {
+    use Out::*;
+    binds(&[(b'W' as u16, RT), (b'S' as u16, LT), (b'A' as u16, LLeft), (b'D' as u16, LRight), (0x20, A), (0x10, X), (b'C' as u16, Y),
+        (b'R' as u16, B), (b'Q' as u16, LB), (b'E' as u16, RB), (0x26, RUp), (0x28, RDown), (0x25, RLeft), (0x27, RRight), (b'M' as u16, Back), (0x1B, Start)])
+}
+
+/// Platformer: WASD moves, Space jumps, J / K / L the face buttons.
+fn platform_layout() -> Vec<KeyBind> {
+    use Out::*;
+    binds(&[(b'W' as u16, LUp), (b'A' as u16, LLeft), (b'S' as u16, LDown), (b'D' as u16, LRight), (0x20, A), (b'J' as u16, X), (b'K' as u16, B),
+        (b'L' as u16, Y), (0x10, RT), (b'Q' as u16, LB), (b'E' as u16, RB), (0x26, RUp), (0x28, RDown), (0x25, RLeft), (0x27, RRight), (b'M' as u16, Back), (0x1B, Start)])
+}
+
+/// A binding's key matches a drawn key: Shift / Ctrl / Alt without side match both sides.
+fn same_key(bind: u16, vk: u16) -> bool {
+    bind == vk || matches!((bind, vk), (0x10, 0xA0 | 0xA1) | (0x11, 0xA2 | 0xA3) | (0x12, 0xA4 | 0xA5))
+}
+
+/// First virtual pad output of a button, if it has one.
+fn pad_out(b: &Button) -> Option<Out> {
+    b.slots.iter().find_map(|s| match s { Slot::Out(Act::Pad(o)) => Some(*o), _ => None })
+}
+
+/// Xbox colours for the face buttons, calm groups for the rest.
+fn out_color(o: Out) -> Color32 {
+    use Out::*;
+    match o {
+        A => Color32::from_rgb(63, 174, 73), B => Color32::from_rgb(217, 69, 60), X => Color32::from_rgb(47, 127, 214), Y => Color32::from_rgb(214, 166, 30),
+        LT | RT => Color32::from_rgb(138, 92, 214), LB | RB => Color32::from_rgb(98, 98, 122), LS | RS => Color32::from_rgb(46, 145, 150),
+        LUp | LDown | LLeft | LRight => Color32::from_rgb(40, 140, 105), RUp | RDown | RLeft | RRight => Color32::from_rgb(176, 86, 120),
+        _ => Color32::from_rgb(88, 88, 108),
+    }
+}
+
+fn short_out(o: Out) -> &'static str {
+    use Out::*;
+    match o {
+        LUp => "L↑", LDown => "L↓", LLeft => "L←", LRight => "L→", RUp => "R↑", RDown => "R↓", RLeft => "R←", RRight => "R→",
+        Up => "D↑", Down => "D↓", Left => "D←", Right => "D→", o => o.label(),
+    }
+}
+
+/// One key: name on top, its controller output as a coloured badge, lit while held.
+/// `bind`: None = unassigned, Some(None) = assigned to something other than the pad.
+fn key_cap(ui: &mut egui::Ui, r: Rect, label: &str, bind: Option<Option<Out>>, held: bool, id: egui::Id, click: bool) -> egui::Response {
+    let resp = ui.interact(r, id, if click { Sense::click() } else { Sense::hover() });
+    let c = pal(ui.visuals().dark_mode);
+    let p = ui.painter();
+    let hov = click && resp.hovered();
+    p.rect_filled(r, 6.0, if held { c.acc.gamma_multiply(0.35) } else if hov { c.hover } else { c.idle });
+    if held { p.rect_stroke(r, 6.0, Stroke::new(1.5, c.acc), egui::StrokeKind::Inside); }
+    let fs = (r.height() * 0.27).clamp(8.5, 12.5);
+    match bind {
+        Some(Some(o)) => {
+            p.text(r.left_top() + vec2(5.0, 3.0), Align2::LEFT_TOP, label, FontId::proportional(fs * 0.9), c.weak);
+            let h = (r.height() * 0.42).max(11.0);
+            let b = Rect::from_min_max(Pos2::new(r.left() + 3.0, r.bottom() - h - 3.0), Pos2::new(r.right() - 3.0, r.bottom() - 3.0));
+            p.rect_filled(b, 4.0, out_color(o));
+            p.text(b.center(), Align2::CENTER_CENTER, short_out(o), bold(fs), Color32::WHITE);
+        }
+        Some(None) => {
+            p.text(r.center(), Align2::CENTER_CENTER, label, FontId::proportional(fs), c.text);
+            p.circle_filled(Pos2::new(r.center().x, r.bottom() - 5.0), 2.0, c.acc);
+        }
+        None => { p.text(r.center(), Align2::CENTER_CENTER, label, FontId::proportional(fs), c.weak.gamma_multiply(0.8)); }
+    }
+    resp
+}
+
+/// Usual shooter layout on an Xbox pad, as keyboard + mouse: WASD moves, mouse buttons aim / fire.
+fn fps_layout() -> Vec<KeyBind> {
+    use Out::*;
+    [
+        (b'W' as u16, LUp), (b'A' as u16, LLeft), (b'S' as u16, LDown), (b'D' as u16, LRight),
+        (0x20, A), (b'C' as u16, B), (b'R' as u16, X), (b'E' as u16, X), (b'1' as u16, Y),
+        (b'Q' as u16, LB), (b'G' as u16, RB), (0x02, LT), (0x01, RT), // right mouse aims, left mouse fires
+        // not Tab / Alt: mapped keys are swallowed while on, and Alt+Tab must keep working
+        (0x10, LS), (b'V' as u16, RS), (b'M' as u16, Back), (0x1B, Start),
+        (0x26, Up), (0x28, Down), (0x25, Left), (0x27, Right),
+    ].into_iter().map(|(vk, o)| KeyBind { vk, btn: Button::out(Act::Pad(o)) }).collect()
+}
+
+/// Every connected controller and keyboard with a live dot while it sends input, plus the 4 XInput slots.
+/// Keyboards can be made players 2–4 (party mode): each drives its own virtual pad while padmimic is on.
+fn devices_card(ui: &mut egui::Ui, party: &mut Vec<String>) {
+    use crate::devices::{self, Kind};
+    let c = pal(ui.visuals().dark_mode);
+    let list = devices::list();
+    let pads = list.iter().filter(|d| d.kind == Kind::Pad).count();
+    let kbs = list.iter().filter(|d| d.kind == Kind::Keyboard && !d.mouse).count();
+    let title = format!("{} · {pads} {} · {kbs} {}", tr("Devices"), tr("controllers"), tr("keyboards"));
+    card(ui, &title, |ui| {
+        if list.is_empty() { ui.label(RichText::new(tr("Searching…")).color(c.weak)); }
+        for d in &list {
+            ui.horizontal(|ui| {
+                ui.set_min_height(30.0);
+                let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+                icons::draw(ui.painter(), if d.kind == Kind::Pad { Icon::Pad } else { Icon::Keyboard }, r, c.weak);
+                let on = devices::active(d);
+                let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                ui.painter().circle_filled(dot.center(), 4.0, if on { c.acc } else { c.line });
+                ui.label(RichText::new(&d.name).color(c.text));
+                let tag = match d.kind {
+                    Kind::Pad => if d.xinput { "XInput" } else { "HID" },
+                    Kind::Keyboard => if d.mouse { tr("mouse with keys") } else { "" },
+                };
+                if !tag.is_empty() { ui.label(RichText::new(tag).size(11.5).color(c.weak)); }
+                if d.kind == Kind::Keyboard && !d.mouse {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let id = d.id();
+                        let slot = party.iter().position(|p| *p == id);
+                        let text = match slot { Some(i) => format!("{} {}", tr("Player"), i + 2), None => format!("+ {}", tr("Player")) };
+                        let full = slot.is_none() && party.len() >= 3;
+                        let hint = if full { tr("Up to 3 extra players (XInput has 4 slots)") } else { tr("This keyboard drives its own virtual controller while padmimic is on: WASD / arrows = sticks, Space A, C B, E X, R Y, Q LB, F RB, Z LT, X RT, Enter Start") };
+                        if ui.add_enabled(!full, egui::Button::new(RichText::new(text).color(if slot.is_some() { c.acc } else { c.text })).selected(slot.is_some()))
+                            .on_hover_text(hint).on_disabled_hover_text(hint).clicked() {
+                            match slot { Some(i) => { party.remove(i); } None => party.push(id) }
+                        }
+                    });
+                }
+            });
+        }
+        if !party.is_empty() {
+            let live = crate::engine::PARTY_LIVE.load(std::sync::atomic::Ordering::Relaxed);
+            ui.label(RichText::new(format!("{}: {live}/{}", tr("Player pads plugged in"), party.len().min(3))).size(12.0).color(if live > 0 { c.acc } else { c.weak }))
+                .on_hover_text(tr("Only while padmimic is on. Keys still reach the window in front too."));
+        }
+        let (slots, used) = crate::engine::xinput_slots();
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(tr("XInput slots")).size(12.0).color(c.weak));
+            for (i, s) in slots.iter().enumerate() {
+                let text = match (*s, used == Some(i)) {
+                    (2, _) => format!("{} {}", i + 1, tr("virtual")),
+                    (3, _) => format!("{} {}", i + 1, tr("player")),
+                    (1, true) => format!("{} {}", i + 1, tr("in use")),
+                    (1, false) => format!("{} {}", i + 1, tr("pad")),
+                    _ => format!("{} –", i + 1),
+                };
+                let col = if used == Some(i) && *s == 1 { c.acc } else if *s == 0 { c.line } else { c.weak };
+                ui.label(RichText::new(text).size(12.0).color(col));
+            }
+        });
+    });
+}
+
 /// Aurora: a few large soft colour clouds drifting slowly, tinted by the accent.
 pub(crate) fn aurora(p: &egui::Painter, r: Rect, t: f32, acc: Color32, dark: bool) {
     p.rect_filled(r, 0.0, if dark { Color32::from_rgb(4, 4, 8) } else { Color32::from_rgb(246, 246, 250) });
@@ -2933,7 +3360,7 @@ impl eframe::App for App {
             self.taskbar_icon_applied = crate::tray::apply_taskbar_icon();
         }
         self.controller_overlay.poll(&mut self.st.overlay);
-        self.capture();
+        self.capture(winio::own_foreground());
         self.background();
         self.look(&ctx);
         let on = self.s.on.load(Relaxed);
@@ -2953,8 +3380,11 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
             if self.restore.is_none() { self.toggle_max(&ctx) }
         } else if self.restore.is_none() { self.normal = outer }
+        if std::mem::take(&mut self.grow_for_kb) { self.grow_window(&ctx, vec2(1500.0, 920.0)) }
         window_edges(&ctx, self.restore.is_some());
-        let active = self.s.live.lock().unwrap().active.clone();
+        let mut active = self.s.live.lock().unwrap().active.clone();
+        // privacy: assigned keys only light up while padmimic is in front (controller buttons always do)
+        if !winio::own_foreground() { active.retain(|e| !matches!(e, Elem::Key(_))) }
         if std::mem::take(&mut self.show_settings) { self.toggle_settings(&ctx) }
 
         let dark = ctx.theme() == Theme::Dark;

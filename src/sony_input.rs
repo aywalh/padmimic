@@ -153,7 +153,7 @@ fn extra_buttons(report: &[u8], model: SonyModel, bluetooth: bool) -> u8 {
 use std::mem::{size_of, zeroed};
 use std::sync::Mutex;
 use vigem_client::{XButtons, XGamepad};
-use windows_sys::Win32::Foundation::{HANDLE, HWND};
+use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::UI::Input::*;
 
 #[derive(Clone, Copy)]
@@ -182,16 +182,6 @@ pub fn removed(handle: usize) {
         .lock()
         .unwrap()
         .retain(|device| device.handle != handle);
-}
-
-pub unsafe fn register(hwnd: HWND) {
-    let gamepad = RAWINPUTDEVICE {
-        usUsagePage: 1,
-        usUsage: 5,
-        dwFlags: RIDEV_INPUTSINK | RIDEV_DEVNOTIFY,
-        hwndTarget: hwnd,
-    };
-    unsafe { RegisterRawInputDevices(&gamepad, 1, size_of::<RAWINPUTDEVICE>() as u32) };
 }
 
 unsafe fn identify(handle: HANDLE) -> Option<SonyModel> {

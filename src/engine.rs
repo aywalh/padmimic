@@ -275,11 +275,13 @@ impl Acc {
     fn stick(&mut self, s: VStick) -> &mut (f64, f64) {
         if s == VStick::Left { &mut self.l } else { &mut self.r }
     }
-    fn gamepad(mut self) -> XGamepad {
+    /// `walk` scales the left stick after the circle clamp, so walking diagonals stay as long as straight lines.
+    fn gamepad(mut self, walk: f64) -> XGamepad {
         for v in [&mut self.l, &mut self.r] {
             let len = (v.0 * v.0 + v.1 * v.1).sqrt();
             if len > 1.0 { v.0 /= len; v.1 /= len; } // keyboard diagonals on the unit circle
         }
+        self.l = (self.l.0 * walk, self.l.1 * walk);
         let ax = |v: f64| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
         XGamepad {
             buttons: XButtons(self.b), left_trigger: self.lt, right_trigger: self.rt,
@@ -652,9 +654,67 @@ impl AimState {
 static DX: AtomicI32 = AtomicI32::new(0);
 static DY: AtomicI32 = AtomicI32::new(0);
 
+/// The pad that these held outputs give (diagonals on the circle, `walk` on the left stick): the Keyboard tab
+/// previews it even while padmimic is off.
+pub fn preview_pad(held: impl Iterator<Item = Out>, walk: f64) -> XGamepad {
+    let mut acc = Acc::default();
+    for o in held { acc.push(o, 1.0) }
+    acc.gamepad(walk)
+}
+
+/// What the party pads show right now: slot_scan_thread must never take one for a real controller.
+static PARTY_OUT: Mutex<Vec<XGamepad>> = Mutex::new(Vec::new());
+/// Party players with a plugged-in pad, for the UI.
+pub static PARTY_LIVE: AtomicU8 = AtomicU8::new(0);
+
+/// Party mode: every chosen keyboard drives its own virtual Xbox pad (player 2, 3, 4) while padmimic is on.
+/// Keys still reach the focused window too: split-screen games usually only read pads.
+fn party_thread(s: Arc<Shared>) {
+    let mut pads: Vec<(String, Xbox360Wired<Client>, XGamepad)> = vec![];
+    let mut retry_at = Instant::now();
+    let mut on_since: Option<Instant> = None;
+    loop {
+        thread::sleep(Duration::from_millis(4));
+        let on = s.on.load(Relaxed);
+        if !on { on_since = None } else if on_since.is_none() { on_since = Some(Instant::now()) }
+        let want: Vec<String> = { let st = s.settings.lock().unwrap(); if on && st.kb_on { st.party.iter().take(3).cloned().collect() } else { vec![] } };
+        pads.retain(|(id, ..)| want.contains(id)); // dropping a target unplugs it
+        // the main virtual pad finds its slot as "the next new one": plug party pads only after it settled
+        let settled = on_since.is_some_and(|t| t.elapsed() > Duration::from_secs(1)) && !LOOKING.load(Relaxed);
+        if settled && Instant::now() >= retry_at {
+            let missing: Vec<String> = want.iter().filter(|id| !pads.iter().any(|p| &p.0 == *id)).cloned().collect();
+            for id in &missing {
+                let pad = Client::connect().ok().and_then(|c| {
+                    let mut t = Xbox360Wired::new(c, TargetId::XBOX360_WIRED);
+                    (t.plugin().is_ok() && t.wait_ready().is_ok()).then_some(t)
+                });
+                match pad {
+                    Some(t) => pads.push((id.clone(), t, XGamepad::default())),
+                    None => { retry_at = Instant::now() + Duration::from_secs(3); break } // ViGEmBus missing / busy
+                }
+            }
+        }
+        let list = if pads.is_empty() { vec![] } else { crate::devices::list() };
+        let mut outs = Vec::with_capacity(pads.len());
+        for (id, t, last) in &mut pads {
+            let keys = list.iter().find(|d| d.id() == *id).map(crate::devices::held).unwrap_or_default();
+            let mut acc = Acc::default();
+            for (vk, o) in PARTY_LAYOUT { if crate::devices::is_held(&keys, vk) { acc.push(o, 1.0) } }
+            let g = acc.gamepad(1.0);
+            if g != *last && t.update(&g).is_ok() { *last = g } // only on change: no packet churn
+            outs.push(g);
+        }
+        PARTY_LIVE.store(pads.len() as u8, Relaxed);
+        *PARTY_OUT.lock().unwrap() = outs;
+    }
+}
+
 pub fn spawn(s: Arc<Shared>) {
     thread::spawn(raw_mouse_thread);
     thread::spawn(slot_scan_thread);
+    crate::devices::start();
+    let ps = s.clone();
+    thread::spawn(move || party_thread(ps));
     thread::spawn(move || run(s));
 }
 
@@ -665,6 +725,14 @@ static SLOT_HINT: AtomicU8 = AtomicU8::new(NONE);
 static VIRT: AtomicU8 = AtomicU8::new(NONE);
 /// Virtual pad just plugged in: the next slot that appears is ours.
 static LOOKING: AtomicBool = AtomicBool::new(false);
+/// Per XInput slot, for the devices list: 0 empty, 1 real pad, 2 our virtual pad, 3 a party pad.
+static XSLOTS: [AtomicU8; 4] = [const { AtomicU8::new(0) }; 4];
+
+/// XInput slots (0 empty, 1 real pad, 2 our virtual pad) and the one the engine reads.
+pub fn xinput_slots() -> ([u8; 4], Option<usize>) {
+    let used = SLOT_HINT.load(Relaxed);
+    (XSLOTS.each_ref().map(|s| s.load(Relaxed)), (used != NONE).then_some(used as usize))
+}
 /// What our virtual pad shows right now; None = not plugged in.
 static OUT: Mutex<Option<XGamepad>> = Mutex::new(None);
 
@@ -674,6 +742,7 @@ static OUT: Mutex<Option<XGamepad>> = Mutex::new(None);
 fn slot_scan_thread() {
     let mut seen = [None::<u32>; 4];
     let mut active = [None::<Instant>; 4];
+    let mut party = [false; 4];
     let (mut look_t, mut scanned): (Option<Instant>, bool) = (None, false);
     loop {
         // XInput can take seconds to list a new pad; a real one plugged in at the same moment is unlikely
@@ -686,18 +755,26 @@ fn slot_scan_thread() {
         let mut best: Option<(u32, Option<Instant>)> = None;
         for i in 0..4u32 {
             let k = i as usize;
-            let Some((pkt, g)) = (i as u8 != virt).then(|| read_xinput(i)).flatten() else {
-                (seen[k], active[k]) = (None, None);
+            let reading = (i as u8 != virt).then(|| read_xinput(i)).flatten();
+            let Some((pkt, g)) = reading else {
+                XSLOTS[k].store(if i as u8 == virt { 2 } else { 0 }, Relaxed);
+                (seen[k], active[k], party[k]) = (None, None, false);
                 continue;
             };
             if seen[k].is_none() && look_t.is_some() && scanned && LOOKING.swap(false, Relaxed) {
                 VIRT.store(i as u8, Relaxed); // appeared after our plug-in: ours
                 continue;
             }
-            let ours = out == Some(g); // shows exactly our output: our own pad, unidentified
+            // once a slot shows a moving party pad's exact state it stays a party slot until it disappears
+            if g != XGamepad::default() && PARTY_OUT.lock().unwrap().contains(&g) { party[k] = true }
+            XSLOTS[k].store(if party[k] { 3 } else { 1 }, Relaxed);
+            // shows exactly our output: our own pad, unidentified
+            let ours = party[k] || out == Some(g);
             if !ours && seen[k].is_some_and(|p| p != pkt) { active[k] = Some(Instant::now()) }
             seen[k] = Some(pkt);
-            if !ours && best.is_none_or(|b| active[k] > b.1) { best = Some((i, active[k])) }
+            // with party pads around, an untouched slot may be one of them: only a moved pad is the real one
+            let candidate = !ours && (PARTY_LIVE.load(Relaxed) == 0 || active[k].is_some());
+            if candidate && best.is_none_or(|b| active[k] > b.1) { best = Some((i, active[k])) }
         }
         SLOT_HINT.store(best.map_or(NONE, |b| b.0 as u8), Relaxed);
         scanned = true; // from now on a slot without a previous reading is a newly plugged one
@@ -758,7 +835,7 @@ impl Engine {
     }
 
     /// Turn the real pad + keyboard into virtual button samples, and add analog passthrough to `acc`.
-    fn sample(&mut self, set: &Set, phys: &XGamepad, sony: u8, now: u64, acc: &mut Acc) -> Vec<Sample> {
+    fn sample(&mut self, set: &Set, phys: &XGamepad, sony: u8, keys: bool, now: u64, acc: &mut Acc) -> Vec<Sample> {
         let mut v: Vec<Sample> = Vec::with_capacity(48);
         for (i, o) in PAD_BUTTONS.iter().enumerate() {
             v.push((Elem::Btn(i as u8), phys.buttons.raw & o.bit() != 0, 1.0, false));
@@ -799,7 +876,7 @@ impl Engine {
             }
         }
         for (i, k) in set.keys.iter().enumerate() {
-            v.push((Elem::Key(i as u16), winio::down(k.vk), 1.0, false));
+            v.push((Elem::Key(i as u16), keys && winio::down(k.vk), 1.0, false));
         }
         v
     }
@@ -829,18 +906,25 @@ impl Engine {
         let set = &p.sets[self.set.min(7)];
         // keys mapped to the virtual pad must not also reach the game as keys: getting WASD as key *and*
         // as stick makes games flip between keyboard and controller mode every frame (slow, broken movement)
+        // the two halves switch on / off separately: controller mappings, keyboard + mouse mappings
+        let (pad_part, kb_part) = (st.pad_on, st.kb_on);
+        let idle = XGamepad::default();
+        let phys = if pad_part { phys } else { &idle };
         let mut block = [false; 256];
-        if on {
+        if on && kb_part {
             for k in set.keys.iter().filter(|k| k.btn.slots.iter().any(|s| matches!(s, Slot::Out(Act::Pad(_))))) {
                 block[k.vk as usize & 0xFF] = true;
             }
+            if p.walk_vk != 0 { block[p.walk_vk as usize & 0xFF] = true } // walk key is a pad thing too
         }
         for (b, v) in winio::BLOCK.iter().zip(block) { b.store(v, Relaxed) }
         // system-wide hooks delay every key/mouse event on the PC: only while something is blocked,
         // raw mouse only while mouse aim runs (AntiMicro has neither, so idle padmimic must have neither)
-        set_inputs(block.contains(&true), on && p.mouse_aim.enabled);
+        let aim_on = on && kb_part && p.mouse_aim.enabled;
+        set_inputs(block.contains(&true), aim_on);
         let mut fx = Frame::default();
-        let samples = self.sample(set, phys, live.sony.map_or(0, |sample| sample.extra), now, &mut fx.pad);
+        let sony = if pad_part { live.sony.map_or(0, |sample| sample.extra) } else { 0 };
+        let samples = self.sample(set, phys, sony, kb_part, now, &mut fx.pad);
 
         live.active.clear();
         live.active.extend(samples.iter().filter(|s| s.1).map(|s| s.0));
@@ -868,7 +952,7 @@ impl Engine {
         // mouse -> virtual stick (keyboard & mouse players)
         let aim = &p.mouse_aim;
         self.aim.step((DX.swap(0, Relaxed) as f32, DY.swap(0, Relaxed) as f32), dt_ms as f32, aim);
-        if let (true, Some((x, y))) = (aim.enabled, self.aim.stick(aim)) {
+        if let (true, Some((x, y))) = (aim_on, self.aim.stick(aim)) {
             let s = fx.pad.stick(aim.stick);
             s.0 += x;
             s.1 += y;
@@ -905,7 +989,8 @@ impl Engine {
         if let Some(s) = next { self.switch_set(s, &samples) }
 
         let fx_pad = std::mem::take(&mut fx.pad);
-        fx_pad.gamepad()
+        let walking = kb_part && p.walk_vk != 0 && winio::down(p.walk_vk);
+        fx_pad.gamepad(if walking { p.walk.clamp(0.05, 1.0) as f64 } else { 1.0 })
     }
 
     fn output(&mut self, fx: &Frame, st: &Settings, now: u64, dt_ms: f64) {
@@ -1220,8 +1305,10 @@ fn raw_mouse_thread() {
         let hwnd = CreateWindowExW(0, class, class, 0, 0, 0, 0, 0, HWND_MESSAGE, ptr::null_mut(), hinst, ptr::null());
         // while hooked, every key and click on the system waits for this thread: keep it first in line
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-        sony_input::register(hwnd);
         INPUT_HWND.store(hwnd, Relaxed);
+        // pads and keyboards, read only to see which device is in use (nothing is swallowed)
+        let rids = crate::devices::USAGES.map(|u| RAWINPUTDEVICE { usUsagePage: 1, usUsage: u, dwFlags: RIDEV_INPUTSINK | RIDEV_DEVNOTIFY, hwndTarget: hwnd });
+        RegisterRawInputDevices(rids.as_ptr(), rids.len() as u32, mem::size_of::<RAWINPUTDEVICE>() as u32);
         let mut msg = mem::zeroed();
         while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {
             DispatchMessageW(&msg);
@@ -1268,14 +1355,29 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
         }
         if msg == WM_INPUT_DEVICE_CHANGE && w as u32 == GIDC_REMOVAL {
             sony_input::removed(l as usize);
+            crate::devices::removed(l as isize);
         }
         if msg == WM_INPUT {
+            // header first: pad (HID) reports are bigger than RAWINPUT and only their device is needed
+            let mut hdr: RAWINPUTHEADER = mem::zeroed();
+            let mut hsize = mem::size_of::<RAWINPUTHEADER>() as u32;
+            if GetRawInputData(l as HRAWINPUT, RID_HEADER, &mut hdr as *mut _ as *mut _, &mut hsize, hsize) != u32::MAX && hdr.dwType != RIM_TYPEMOUSE {
+                crate::devices::touch(hdr.hDevice);
+                if hdr.dwType == RIM_TYPEKEYBOARD {
+                    let mut ri: RAWINPUT = mem::zeroed();
+                    let mut size = mem::size_of::<RAWINPUT>() as u32;
+                    if GetRawInputData(l as HRAWINPUT, RID_INPUT, &mut ri as *mut _ as *mut _, &mut size, hsize) != u32::MAX {
+                        let k = ri.data.keyboard;
+                        if k.VKey != 0xFF { crate::devices::key(hdr.hDevice, k.VKey, k.Flags as u32 & RI_KEY_BREAK == 0) }
+                    }
+                } else if hdr.dwType == RIM_TYPEHID {
+                    sony_input::raw_input(l as HRAWINPUT);
+                }
+                return DefWindowProcW(h, msg, w, l);
+            }
             let mut ri: RAWINPUT = mem::zeroed();
             let mut size = mem::size_of::<RAWINPUT>() as u32;
             let got = GetRawInputData(l as HRAWINPUT, RID_INPUT, &mut ri as *mut _ as *mut _, &mut size, mem::size_of::<RAWINPUTHEADER>() as u32);
-            if got == u32::MAX || ri.header.dwType == RIM_TYPEHID {
-                sony_input::raw_input(l as HRAWINPUT);
-            }
             // injected moves (our own spring/cursor output) must not feed back into mouse aim
             if got != u32::MAX && ri.header.dwType == RIM_TYPEMOUSE && !ri.header.hDevice.is_null() && ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE == 0 {
                 DX.fetch_add(ri.data.mouse.lLastX, Relaxed);
@@ -1408,6 +1510,42 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_stick_circle_walk_and_socd() {
+        let len = |g: XGamepad| ((g.thumb_lx as f64).powi(2) + (g.thumb_ly as f64).powi(2)).sqrt() / 32767.0;
+        let stick = |outs: &[Out], walk: f64| { let mut a = Acc::default(); for &o in outs { a.push(o, 1.0) } a.gamepad(walk) };
+        assert!((len(stick(&[Out::LUp, Out::LRight], 1.0)) - 1.0).abs() < 0.01, "diagonal on the circle");
+        assert!((len(stick(&[Out::LUp, Out::LRight], 0.5)) - 0.5).abs() < 0.01, "walking diagonal = walking straight");
+        assert!((len(stick(&[Out::LUp], 0.5)) - 0.5).abs() < 0.01);
+        assert_eq!(stick(&[Out::LLeft, Out::LRight], 1.0).thumb_lx, 0, "A+D together = neutral");
+    }
+
+    /// Tests that tick the engine share winio::BLOCK: run them one at a time.
+    static BLOCK_TESTS: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn controller_and_keyboard_switch_separately() {
+        let _one = BLOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut p = Profile::default();
+        p.sets[0].keys.push(KeyBind { vk: b'K' as u16, btn: Button::out(Act::Pad(Out::LLeft)) });
+        p.sets[0].buttons[0] = Button::out(Act::Pad(Out::B)); // real A -> virtual B
+        let pad_a = XGamepad { buttons: XButtons(XButtons::A), ..Default::default() };
+        let (mut live, mut ev) = (Live::default(), vec![]);
+        let run = |st: &Settings, live: &mut Live, ev: &mut Vec<Event>| Engine::new().tick(&p, st, &pad_a, true, 0, 1.0, None, live, ev);
+
+        let both = Settings::default();
+        assert!(run(&both, &mut live, &mut ev).buttons.raw & XButtons::B != 0, "controller part maps A -> B");
+        assert!(winio::BLOCK[b'K' as usize].load(Relaxed), "keyboard part swallows mapped keys");
+
+        let kb_only = Settings { pad_on: false, ..Settings::default() };
+        assert_eq!(run(&kb_only, &mut live, &mut ev).buttons.raw & XButtons::B, 0, "controller part off: real pad ignored");
+        assert!(winio::BLOCK[b'K' as usize].load(Relaxed), "keyboard part still on");
+
+        let pad_only = Settings { kb_on: false, ..Settings::default() };
+        assert!(run(&pad_only, &mut live, &mut ev).buttons.raw & XButtons::B != 0);
+        assert!(!winio::BLOCK[b'K' as usize].load(Relaxed), "keyboard part off: keys reach the game untouched");
+    }
+
+    #[test]
     fn profile_uses_pad() {
         let mut p = Profile::default();
         assert!(!p.uses_pad(), "default profile must leave the real controller alone");
@@ -1422,6 +1560,7 @@ mod tests {
 
     #[test]
     fn pad_keys_blocked_only_while_on() {
+        let _one = BLOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let mut p = Profile::default();
         p.sets[0].keys.push(KeyBind { vk: b'A' as u16, btn: Button::out(Act::Pad(Out::LLeft)) });
         p.sets[0].keys.push(KeyBind { vk: b'Q' as u16, btn: Button::out(Act::Key(b'E' as u16)) });

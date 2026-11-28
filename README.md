@@ -13,6 +13,10 @@ Map your controller to keys, mouse actions or a virtual Xbox 360 pad. Save layou
 ![The redesigned padmimic controller view](docs/redesign.png)
 
 
+## Keyboard to controller
+
+Open **Keyboard & mouse** to map keys to Xbox 360 controller inputs and preview the result. Choose a keyboard layout, assign keys to sticks or buttons, and set a walk key for finer movement. The Controller tab lists connected input devices and lets you assign additional keyboards to virtual players 2–4. Enable keyboard mappings and install ViGEmBus to send virtual controller input to games.
+
 ## PlayStation controllers
 
 DualShock 4 and DualSense work directly over USB and Bluetooth. Use **Automatic layout** in Customization to match the live preview and pop-out to the detected controller. PlayStation touchpad clicks and supported mute-button reports can be mapped in the Buttons card.

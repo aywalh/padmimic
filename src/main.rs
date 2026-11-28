@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 mod brand;
+mod devices;
 mod docking;
 mod engine;
 mod i18n;
